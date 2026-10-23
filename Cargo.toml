@@ -1,0 +1,41 @@
+[package]
+name = "cosmonaut"
+version = "0.0.1"
+authors = ["nexos"]
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+readme = "README.md"
+description = "Servo browser engine with libcosmic chrome"
+
+[dependencies.servo]
+git = "https://github.com/servo/servo.git"
+rev = "8cd4f60da15ccbc30d5f1b9935d17bb0a5c0ce40"
+default-features = false
+features = ["bundled_freetype", "clipboard", "js_jit"]
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic.git"
+rev = "430f3d48a97d8779f9c1985473912e594ccca1ae"
+default-features = false
+features = ["about", "multi-window", "tokio", "wayland", "surface-message", "wgpu", "xdg-portal"]
+
+[build-dependencies]
+
+[profile.release]
+lto = true
+strip = true
+opt-level = "z"
+codegen-units = 1
+debug = false
+
+[package.metadata.deb]
+extended-description = """\
+
+"""
+
+assets = [
+    ["target/release/cosmonaut", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/cosmonaut/README.md", "755"],
+    ["cosmonaut.desktop", "usr/share/applications/", "644"]
+]

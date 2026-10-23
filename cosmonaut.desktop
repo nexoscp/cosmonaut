@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Cosmonaut
+Comment=Servo browser engine with libcosmic chrome
+Exec=cosmonaut
+Icon=cosmonaut.png
+Terminal=false
+Categories=Network;WebBrowser;
