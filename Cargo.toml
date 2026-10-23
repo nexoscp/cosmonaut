@@ -6,10 +6,10 @@ edition = "2024"
 license = "MPL-2.0"
 publish = false
 readme = "README.md"
-description = "Servo browser engine with libcosmic chrome"
+description = "Servo browser engine with libcosmic shell"
 
 [dependencies]
-dpi = "0.1"
+dpi = "0.1.2"
 
 [dependencies.servo]
 git = "https://github.com/servo/servo.git"

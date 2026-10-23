@@ -1,11 +1,13 @@
 use cosmic::app::{self, Core, Settings};
 use cosmic::dialog::ashpd::url;
+use cosmic::iced::Length;
+use cosmic::iced::Point;
+use cosmic::iced::Subscription;
+use cosmic::iced::mouse::ScrollDelta;
 use cosmic::iced::time::{Duration, every};
+use cosmic::iced::widget::column;
 use cosmic::iced::widget::image;
 use cosmic::iced::widget::image::Handle;
-use cosmic::iced::Length;
-use cosmic::iced::Subscription;
-use cosmic::iced::widget::column;
 use cosmic::prelude::*;
 use cosmic::widget::row;
 use cosmic::widget::text;
@@ -13,12 +15,31 @@ use cosmic::widget::text_input;
 use cosmic::{executor, iced, widget};
 use dpi::PhysicalSize;
 use servo::{
-    DeviceIntPoint, DeviceIntRect, RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext,
-    WebView, WebViewBuilder, WebViewDelegate,
+    DeviceIntPoint, DeviceIntRect, DevicePoint, InputEvent, MouseButton, MouseButtonAction,
+    MouseButtonEvent, MouseMoveEvent, RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext,
+    WebView, WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
 };
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+
+/// Apply transparency to RGBA pixel data to allow frost effect to show through
+fn apply_transparency(pixels: &[u8], alpha: u8) -> Vec<u8> {
+    let mut result = Vec::with_capacity(pixels.len());
+    let alpha_factor = alpha as f32 / 255.0;
+    for chunk in pixels.chunks_exact(4) {
+        let r = chunk[0] as f32;
+        let g = chunk[1] as f32;
+        let b = chunk[2] as f32;
+        let a = chunk[3] as f32;
+        // Apply transparency while preserving the original alpha
+        result.push(r as u8);
+        result.push(g as u8);
+        result.push(b as u8);
+        result.push((a * alpha_factor) as u8);
+    }
+    result
+}
 
 /// Messages from the UI
 #[derive(Clone, Debug)]
@@ -27,6 +48,14 @@ enum Message {
     Go,
     /// Periodic tick to spin Servo's event loop
     Tick,
+    /// Mouse button pressed on webview
+    MousePressed(MouseButton),
+    /// Mouse button released on webview
+    MouseReleased(MouseButton),
+    /// Mouse moved over webview
+    MouseMoved(f32, f32),
+    /// Mouse wheel scrolled over webview
+    Scrolled(f64, f64),
 }
 
 struct App {
@@ -38,6 +67,8 @@ struct App {
     frame_handle: Option<Handle>,
     /// Atomic flag set by the delegate when a frame is ready
     frame_ready_flag: Arc<Cell<bool>>,
+    /// Current mouse position relative to the webview
+    mouse_position: (f32, f32),
 }
 
 /// WebViewDelegate that sets an atomic flag when a frame is ready
@@ -80,7 +111,7 @@ impl cosmic::Application for App {
             .build();
 
         // Load the initial URL
-        let initial_url = "https://github.com/nexos/";
+        let initial_url = "https://github.com/nexoscp/";
         if let Ok(u) = url::Url::parse(initial_url) {
             webview.load(u);
         }
@@ -107,7 +138,9 @@ impl cosmic::Application for App {
                 DeviceIntPoint::new(size.width as i32, size.height as i32),
             );
             if let Some(img) = rendering_context_rc.read_to_image(rect) {
-                frame_handle = Some(Handle::from_rgba(size.width, size.height, img.as_raw().clone()));
+                // Apply transparency to allow frost effect to show through
+                let pixels = apply_transparency(img.as_raw(), 200);
+                frame_handle = Some(Handle::from_rgba(size.width, size.height, pixels));
             }
         }
 
@@ -120,6 +153,7 @@ impl cosmic::Application for App {
                 webview,
                 frame_handle,
                 frame_ready_flag,
+                mouse_position: (0.0, 0.0),
             },
             app::Task::none(),
         )
@@ -167,10 +201,59 @@ impl cosmic::Application for App {
                         DeviceIntPoint::new(size.width as i32, size.height as i32),
                     );
                     if let Some(img) = self.rendering_context.read_to_image(rect) {
+                        // Apply transparency to allow frost effect to show through
+                        let pixels = apply_transparency(img.as_raw(), 200);
                         self.frame_handle =
-                            Some(Handle::from_rgba(size.width, size.height, img.as_raw().clone()));
+                            Some(Handle::from_rgba(size.width, size.height, pixels));
                     }
                 }
+                app::Task::none()
+            }
+            Message::MousePressed(button) => {
+                let (x, y) = self.mouse_position;
+                let point = WebViewPoint::Device(DevicePoint::new(x, y));
+                let event = InputEvent::MouseButton(MouseButtonEvent::new(
+                    MouseButtonAction::Down,
+                    button,
+                    point,
+                ));
+                self.webview.notify_input_event(event);
+                self.servo.spin_event_loop();
+                app::Task::none()
+            }
+            Message::MouseReleased(button) => {
+                let (x, y) = self.mouse_position;
+                let point = WebViewPoint::Device(DevicePoint::new(x, y));
+                let event = InputEvent::MouseButton(MouseButtonEvent::new(
+                    MouseButtonAction::Up,
+                    button,
+                    point,
+                ));
+                self.webview.notify_input_event(event);
+                self.servo.spin_event_loop();
+                app::Task::none()
+            }
+            Message::MouseMoved(x, y) => {
+                self.mouse_position = (x, y);
+                let point = WebViewPoint::Device(DevicePoint::new(x, y));
+                let event = InputEvent::MouseMove(MouseMoveEvent::new(point));
+                self.webview.notify_input_event(event);
+                app::Task::none()
+            }
+            Message::Scrolled(dx, dy) => {
+                let (x, y) = self.mouse_position;
+                let point = WebViewPoint::Device(DevicePoint::new(x, y));
+                let event = InputEvent::Wheel(WheelEvent::new(
+                    WheelDelta {
+                        x: dx,
+                        y: dy,
+                        z: 0.0,
+                        mode: WheelMode::DeltaPixel,
+                    },
+                    point,
+                ));
+                self.webview.notify_input_event(event);
+                self.servo.spin_event_loop();
                 app::Task::none()
             }
         }
@@ -179,7 +262,10 @@ impl cosmic::Application for App {
     fn view(&self) -> Element<'_, Message> {
         let button = widget::button::text("Go").on_press(Message::Go);
 
-        let url_bar = row![text_input("https://", &self.url), button,]
+        let url_input = text_input("https://", &self.url)
+            .on_input(Message::UrlChanged)
+            .on_submit(|_| Message::Go);
+        let url_bar = row![url_input, button,]
             .padding(8)
             .spacing(8);
 
@@ -188,7 +274,28 @@ impl cosmic::Application for App {
                 let img = image::Image::new(handle.clone())
                     .width(Length::Fill)
                     .height(Length::Fill);
-                widget::container(img)
+
+                // Wrap in MouseArea to capture mouse events
+                let interactive = widget::MouseArea::new(img)
+                    .on_press(Message::MousePressed(MouseButton::Primary))
+                    .on_release(Message::MouseReleased(MouseButton::Primary))
+                    .on_right_press(Message::MousePressed(MouseButton::Secondary))
+                    .on_right_release(Message::MouseReleased(MouseButton::Secondary))
+                    .on_middle_press(Message::MousePressed(MouseButton::Auxiliary))
+                    .on_middle_release(Message::MouseReleased(MouseButton::Auxiliary))
+                    .on_move(|pos: Point| Message::MouseMoved(pos.x, pos.y))
+                    .on_scroll(|delta: ScrollDelta| {
+                        match delta {
+                            ScrollDelta::Lines { x, y } => {
+                                Message::Scrolled(x as f64 * 76.0, y as f64 * 76.0)
+                            }
+                            ScrollDelta::Pixels { x, y } => {
+                                Message::Scrolled(x as f64, y as f64)
+                            }
+                        }
+                    });
+
+                widget::container(interactive)
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .into()
