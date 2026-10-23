@@ -1669,6 +1669,7 @@ dependencies = [
 name = "cosmonaut"
 version = "0.0.1"
 dependencies = [
+ "dpi 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "libcosmic",
  "servo",
 ]
@@ -7496,6 +7497,7 @@ dependencies = [
  "servo-config",
  "servo-constellation",
  "servo-constellation-traits",
+ "servo-default-resources",
  "servo-embedder-traits",
  "servo-fonts",
  "servo-geometry",
@@ -7735,6 +7737,14 @@ dependencies = [
  "uuid",
  "webrender_api",
  "zeroize",
+]
+
+[[package]]
+name = "servo-default-resources"
+version = "0.7.0"
+source = "git+https://github.com/servo/servo.git?rev=8cd4f60da15ccbc30d5f1b9935d17bb0a5c0ce40#8cd4f60da15ccbc30d5f1b9935d17bb0a5c0ce40"
+dependencies = [
+ "servo-embedder-traits",
 ]
 
 [[package]]

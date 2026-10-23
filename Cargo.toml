@@ -8,11 +8,14 @@ publish = false
 readme = "README.md"
 description = "Servo browser engine with libcosmic chrome"
 
+[dependencies]
+dpi = "0.1"
+
 [dependencies.servo]
 git = "https://github.com/servo/servo.git"
 rev = "8cd4f60da15ccbc30d5f1b9935d17bb0a5c0ce40"
 default-features = false
-features = ["bundled_freetype", "clipboard", "js_jit"]
+features = ["baked-in-resources", "bundled_freetype", "clipboard", "js_jit"]
 
 [dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic.git"
