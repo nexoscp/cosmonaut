@@ -10,6 +10,7 @@ description = "Servo browser engine with libcosmic shell"
 
 [dependencies]
 dpi = "0.1.2"
+url = "2.5"
 
 [dependencies.servo]
 git = "https://github.com/servo/servo.git"

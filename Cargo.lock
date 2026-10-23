@@ -1672,6 +1672,7 @@ dependencies = [
  "dpi 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "libcosmic",
  "servo",
+ "url",
 ]
 
 [[package]]

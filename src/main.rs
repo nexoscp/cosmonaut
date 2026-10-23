@@ -1,5 +1,4 @@
 use cosmic::app::{self, Core, Settings};
-use cosmic::dialog::ashpd::url;
 use cosmic::iced::Length;
 use cosmic::iced::Point;
 use cosmic::iced::Subscription;
@@ -8,6 +7,7 @@ use cosmic::iced::time::{Duration, every};
 use cosmic::iced::widget::column;
 use cosmic::iced::widget::image;
 use cosmic::iced::widget::image::Handle;
+use cosmic::iced::widget::progress_bar;
 use cosmic::prelude::*;
 use cosmic::widget::row;
 use cosmic::widget::text;
@@ -15,13 +15,15 @@ use cosmic::widget::text_input;
 use cosmic::{executor, iced, widget};
 use dpi::PhysicalSize;
 use servo::{
-    DeviceIntPoint, DeviceIntRect, DevicePoint, InputEvent, MouseButton, MouseButtonAction,
-    MouseButtonEvent, MouseMoveEvent, RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext,
-    WebView, WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
+    Cursor, DeviceIntPoint, DeviceIntRect, DevicePoint, InputEvent, LoadStatus, MouseButton,
+    MouseButtonAction, MouseButtonEvent, MouseMoveEvent, RenderingContext, Servo, ServoBuilder,
+    SoftwareRenderingContext, WebView, WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta,
+    WheelEvent, WheelMode,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
+use url::Url;
 
 /// Apply transparency to RGBA pixel data to allow frost effect to show through
 fn apply_transparency(pixels: &[u8], alpha: u8) -> Vec<u8> {
@@ -41,11 +43,27 @@ fn apply_transparency(pixels: &[u8], alpha: u8) -> Vec<u8> {
     result
 }
 
+/// Events from Servo's delegate callbacks
+#[derive(Clone, Debug)]
+enum ServoEvent {
+    UrlChanged(Url),
+    TitleChanged(Option<String>),
+    LoadStatusChanged(LoadStatus),
+    StatusTextChanged(Option<String>),
+    CursorChanged(Cursor),
+    HistoryChanged(Vec<Url>, usize),
+    FrameReady,
+    Crashed(String, Option<String>),
+    FullscreenChanged(bool),
+}
+
 /// Messages from the UI
 #[derive(Clone, Debug)]
 enum Message {
     UrlChanged(String),
     Go,
+    Back,
+    Forward,
     /// Periodic tick to spin Servo's event loop
     Tick,
     /// Mouse button pressed on webview
@@ -61,24 +79,75 @@ enum Message {
 struct App {
     core: Core,
     url: String,
+    title: Option<String>,
+    load_status: LoadStatus,
+    status_text: Option<String>,
+    history_entries: Vec<Url>,
+    history_current: usize,
     servo: Rc<Servo>,
     rendering_context: Rc<SoftwareRenderingContext>,
     webview: WebView,
     frame_handle: Option<Handle>,
     /// Atomic flag set by the delegate when a frame is ready
     frame_ready_flag: Arc<Cell<bool>>,
+    /// Channel receiver for Servo events
+    servo_event_receiver: iced::futures::channel::mpsc::UnboundedReceiver<ServoEvent>,
     /// Current mouse position relative to the webview
     mouse_position: (f32, f32),
 }
 
-/// WebViewDelegate that sets an atomic flag when a frame is ready
-struct FrameReadyDelegate {
+/// WebViewDelegate that sends events through a channel
+struct ServoDelegate {
     flag: Arc<Cell<bool>>,
+    sender: Rc<RefCell<iced::futures::channel::mpsc::UnboundedSender<ServoEvent>>>,
 }
 
-impl WebViewDelegate for FrameReadyDelegate {
+impl WebViewDelegate for ServoDelegate {
     fn notify_new_frame_ready(&self, _webview: WebView) {
         self.flag.set(true);
+        let _ = self.sender.borrow_mut().start_send(ServoEvent::FrameReady);
+    }
+
+    fn notify_url_changed(&self, _webview: WebView, url: Url) {
+        let _ = self.sender.borrow_mut().start_send(ServoEvent::UrlChanged(url));
+    }
+
+    fn notify_page_title_changed(&self, _webview: WebView, title: Option<String>) {
+        let _ = self.sender.borrow_mut().start_send(ServoEvent::TitleChanged(title));
+    }
+
+    fn notify_load_status_changed(&self, _webview: WebView, status: LoadStatus) {
+        let _ = self.sender.borrow_mut().start_send(ServoEvent::LoadStatusChanged(status));
+    }
+
+    fn notify_status_text_changed(&self, _webview: WebView, status: Option<String>) {
+        let _ = self.sender.borrow_mut().start_send(ServoEvent::StatusTextChanged(status));
+    }
+
+    fn notify_cursor_changed(&self, _webview: WebView, cursor: Cursor) {
+        let _ = self.sender.borrow_mut().start_send(ServoEvent::CursorChanged(cursor));
+    }
+
+    fn notify_history_changed(
+        &self,
+        _webview: WebView,
+        entries: Vec<Url>,
+        current: usize,
+    ) {
+        let _ = self.sender.borrow_mut().start_send(ServoEvent::HistoryChanged(entries, current));
+    }
+
+    fn notify_crashed(
+        &self,
+        _webview: WebView,
+        reason: String,
+        backtrace: Option<String>,
+    ) {
+        let _ = self.sender.borrow_mut().start_send(ServoEvent::Crashed(reason, backtrace));
+    }
+
+    fn notify_fullscreen_state_changed(&self, _webview: WebView, is_fullscreen: bool) {
+        let _ = self.sender.borrow_mut().start_send(ServoEvent::FullscreenChanged(is_fullscreen));
     }
 }
 
@@ -102,9 +171,14 @@ impl cosmic::Application for App {
         // Create a flag for frame-ready signaling
         let frame_ready_flag = Arc::new(Cell::new(false));
 
+        // Create channel for Servo events
+        let (servo_event_sender, servo_event_receiver) =
+            iced::futures::channel::mpsc::unbounded::<ServoEvent>();
+
         // Create a WebView with the delegate
-        let delegate = Rc::new(FrameReadyDelegate {
+        let delegate = Rc::new(ServoDelegate {
             flag: frame_ready_flag.clone(),
+            sender: Rc::new(RefCell::new(servo_event_sender)),
         });
         let webview = WebViewBuilder::new(&servo, rendering_context_rc.clone())
             .delegate(delegate)
@@ -112,7 +186,7 @@ impl cosmic::Application for App {
 
         // Load the initial URL
         let initial_url = "https://github.com/nexoscp/";
-        if let Ok(u) = url::Url::parse(initial_url) {
+        if let Ok(u) = Url::parse(initial_url) {
             webview.load(u);
         }
 
@@ -148,11 +222,17 @@ impl cosmic::Application for App {
             Self {
                 core,
                 url: initial_url.to_string(),
+                title: None,
+                load_status: LoadStatus::Complete,
+                status_text: None,
+                history_entries: Vec::new(),
+                history_current: 0,
                 servo: servo_rc,
                 rendering_context: rendering_context_rc,
                 webview,
                 frame_handle,
                 frame_ready_flag,
+                servo_event_receiver,
                 mouse_position: (0.0, 0.0),
             },
             app::Task::none(),
@@ -177,16 +257,64 @@ impl cosmic::Application for App {
                 } else {
                     format!("https://{}", self.url)
                 };
-                if let Ok(u) = url::Url::parse(&url_str) {
+                if let Ok(u) = Url::parse(&url_str) {
                     self.webview.load(u);
                 }
                 // Spin once to start processing
                 self.servo.spin_event_loop();
                 app::Task::none()
             }
+            Message::Back => {
+                if self.history_current > 0 {
+                    self.webview.go_back(1);
+                    self.servo.spin_event_loop();
+                }
+                app::Task::none()
+            }
+            Message::Forward => {
+                if self.history_current < self.history_entries.len().saturating_sub(1) {
+                    self.webview.go_forward(1);
+                    self.servo.spin_event_loop();
+                }
+                app::Task::none()
+            }
             Message::Tick => {
                 // Spin Servo's event loop
                 self.servo.spin_event_loop();
+
+                // Process any pending Servo events from the channel
+                while let Ok(event) = self.servo_event_receiver.try_recv() {
+                    match event {
+                        ServoEvent::UrlChanged(url) => {
+                            self.url = url.to_string();
+                        }
+                        ServoEvent::TitleChanged(title) => {
+                            self.title = title;
+                        }
+                        ServoEvent::LoadStatusChanged(status) => {
+                            self.load_status = status;
+                        }
+                        ServoEvent::StatusTextChanged(status) => {
+                            self.status_text = status;
+                        }
+                        ServoEvent::CursorChanged(_cursor) => {
+                            // Cursor changes could be handled here in the future
+                        }
+                        ServoEvent::HistoryChanged(entries, current) => {
+                            self.history_entries = entries;
+                            self.history_current = current;
+                        }
+                        ServoEvent::FrameReady => {
+                            // Frame ready is also handled via the flag below
+                        }
+                        ServoEvent::Crashed(reason, _backtrace) => {
+                            eprintln!("Servo crashed: {}", reason);
+                        }
+                        ServoEvent::FullscreenChanged(_is_fullscreen) => {
+                            // Fullscreen changes could be handled here in the future
+                        }
+                    }
+                }
 
                 // Check if a frame is ready
                 if self.frame_ready_flag.get() {
@@ -260,14 +388,43 @@ impl cosmic::Application for App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let button = widget::button::text("Go").on_press(Message::Go);
+        // Navigation buttons
+        let back_button = widget::button::text("←")
+            .on_press_maybe(can_go_back(self).then_some(Message::Back))
+            .padding(4);
+        let forward_button = widget::button::text("→")
+            .on_press_maybe(can_go_forward(self).then_some(Message::Forward))
+            .padding(4);
 
+        // URL bar
         let url_input = text_input("https://", &self.url)
             .on_input(Message::UrlChanged)
             .on_submit(|_| Message::Go);
-        let url_bar = row![url_input, button,]
+        let go_button = widget::button::text("Go").on_press(Message::Go);
+
+        // Title display
+        let title_text = self.title.as_deref().unwrap_or("");
+
+        let url_bar = row![back_button, forward_button, url_input, go_button,]
             .padding(8)
             .spacing(8);
+
+        // Progress bar
+        let progress: Element<'_, Message> = match &self.load_status {
+            LoadStatus::Started | LoadStatus::HeadParsed => {
+                let pb = progress_bar(0.0..=1.0, 0.5);
+                widget::container(pb)
+                    .width(Length::Fill)
+                    .height(4)
+                    .into()
+            }
+            LoadStatus::Complete => {
+                widget::container(text(""))
+                    .width(Length::Fill)
+                    .height(4)
+                    .into()
+            }
+        };
 
         let webview_content: Element<'_, Message> = match &self.frame_handle {
             Some(handle) => {
@@ -306,10 +463,22 @@ impl cosmic::Application for App {
                 .into(),
         };
 
-        column![url_bar, webview_content]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        // Status bar
+        let status_text = self.status_text.as_deref().unwrap_or("");
+        let status_bar = row![text(status_text)]
+            .padding(4)
+            .align_y(cosmic::iced::Alignment::Center);
+
+        column![
+            row![text(title_text)].padding(4),
+            url_bar,
+            progress,
+            webview_content,
+            status_bar
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 
     fn core(&self) -> &Core {
@@ -323,4 +492,14 @@ impl cosmic::Application for App {
 
 fn main() -> iced::Result {
     app::run::<App>(Settings::default(), ())
+}
+
+/// Check if we can navigate back
+fn can_go_back(app: &App) -> bool {
+    app.history_current > 0
+}
+
+/// Check if we can navigate forward
+fn can_go_forward(app: &App) -> bool {
+    app.history_current < app.history_entries.len().saturating_sub(1)
 }

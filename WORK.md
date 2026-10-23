@@ -4,6 +4,10 @@
 no X11 deps
 https://github.com/servo/servo/discussions/48722
 
+## Vulkan renderer
+
+Not yet planed for Servo: https://github.com/servo/servo/discussions/34561
+
 # deeply integrated into Linux (UAPI, cgroup2), systemd (), udev, Freedesktop, Wayland, Pipewire
 
 # specs to implement/consider
