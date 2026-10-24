@@ -20,28 +20,9 @@ use servo::{
     SoftwareRenderingContext, WebView, WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta,
     WheelEvent, WheelMode,
 };
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 use url::Url;
-
-/// Apply transparency to RGBA pixel data to allow frost effect to show through
-fn apply_transparency(pixels: &[u8], alpha: u8) -> Vec<u8> {
-    let mut result = Vec::with_capacity(pixels.len());
-    let alpha_factor = alpha as f32 / 255.0;
-    for chunk in pixels.chunks_exact(4) {
-        let r = chunk[0] as f32;
-        let g = chunk[1] as f32;
-        let b = chunk[2] as f32;
-        let a = chunk[3] as f32;
-        // Apply transparency while preserving the original alpha
-        result.push(r as u8);
-        result.push(g as u8);
-        result.push(b as u8);
-        result.push((a * alpha_factor) as u8);
-    }
-    result
-}
 
 /// Events from Servo's delegate callbacks
 #[derive(Clone, Debug)]
@@ -65,7 +46,7 @@ enum Message {
     Back,
     Forward,
     /// Periodic tick to spin Servo's event loop
-    Tick,
+    Tick, //TODO remove, we do have a channel
     /// Mouse button pressed on webview
     MousePressed(MouseButton),
     /// Mouse button released on webview
@@ -88,8 +69,6 @@ struct App {
     rendering_context: Rc<SoftwareRenderingContext>,
     webview: WebView,
     frame_handle: Option<Handle>,
-    /// Atomic flag set by the delegate when a frame is ready
-    frame_ready_flag: Arc<Cell<bool>>,
     /// Channel receiver for Servo events
     servo_event_receiver: iced::futures::channel::mpsc::UnboundedReceiver<ServoEvent>,
     /// Current mouse position relative to the webview
@@ -98,13 +77,12 @@ struct App {
 
 /// WebViewDelegate that sends events through a channel
 struct ServoDelegate {
-    flag: Arc<Cell<bool>>,
     sender: Rc<RefCell<iced::futures::channel::mpsc::UnboundedSender<ServoEvent>>>,
 }
 
 impl WebViewDelegate for ServoDelegate {
     fn notify_new_frame_ready(&self, _webview: WebView) {
-        self.flag.set(true);
+        //self.flag.set(true);
         let _ = self.sender.borrow_mut().start_send(ServoEvent::FrameReady);
     }
 
@@ -158,33 +136,25 @@ impl cosmic::Application for App {
     const APP_ID: &'static str = "nexos.Cosmonaut";
 
     fn init(core: Core, _flags: Self::Flags) -> (Self, app::Task<Message>) {
-        // Initialize the Servo engine
         let servo = ServoBuilder::default().build();
         servo.setup_logging();
 
-        // Create a software rendering context with an initial size
         let initial_size = PhysicalSize { width: 800, height: 600 };
         let rendering_context = SoftwareRenderingContext::new(initial_size)
             .expect("Failed to create SoftwareRenderingContext");
         let rendering_context_rc = Rc::new(rendering_context);
 
-        // Create a flag for frame-ready signaling
-        let frame_ready_flag = Arc::new(Cell::new(false));
 
-        // Create channel for Servo events
         let (servo_event_sender, servo_event_receiver) =
             iced::futures::channel::mpsc::unbounded::<ServoEvent>();
 
-        // Create a WebView with the delegate
         let delegate = Rc::new(ServoDelegate {
-            flag: frame_ready_flag.clone(),
             sender: Rc::new(RefCell::new(servo_event_sender)),
         });
         let webview = WebViewBuilder::new(&servo, rendering_context_rc.clone())
             .delegate(delegate)
             .build();
 
-        // Load the initial URL
         let initial_url = "https://github.com/nexoscp/";
         if let Ok(u) = Url::parse(initial_url) {
             webview.load(u);
@@ -192,14 +162,7 @@ impl cosmic::Application for App {
 
         let servo_rc = Rc::new(servo);
 
-        // Spin the event loop until the first frame is ready
-        loop {
             servo_rc.spin_event_loop();
-            if frame_ready_flag.get() {
-                frame_ready_flag.set(false);
-                break;
-            }
-        }
 
         // Paint and capture the initial frame
         webview.paint();
@@ -212,9 +175,7 @@ impl cosmic::Application for App {
                 DeviceIntPoint::new(size.width as i32, size.height as i32),
             );
             if let Some(img) = rendering_context_rc.read_to_image(rect) {
-                // Apply transparency to allow frost effect to show through
-                let pixels = apply_transparency(img.as_raw(), 200);
-                frame_handle = Some(Handle::from_rgba(size.width, size.height, pixels));
+                frame_handle = Some(Handle::from_rgba(size.width, size.height, img.as_raw().clone()));
             }
         }
 
@@ -231,7 +192,7 @@ impl cosmic::Application for App {
                 rendering_context: rendering_context_rc,
                 webview,
                 frame_handle,
-                frame_ready_flag,
+                //frame_ready_flag,
                 servo_event_receiver,
                 mouse_position: (0.0, 0.0),
             },
@@ -317,8 +278,8 @@ impl cosmic::Application for App {
                 }
 
                 // Check if a frame is ready
-                if self.frame_ready_flag.get() {
-                    self.frame_ready_flag.set(false);
+              //  if self.frame_ready_flag.get() {
+              //      self.frame_ready_flag.set(false);
 
                     // Paint and capture the frame
                     self.webview.paint();
@@ -329,11 +290,9 @@ impl cosmic::Application for App {
                         DeviceIntPoint::new(size.width as i32, size.height as i32),
                     );
                     if let Some(img) = self.rendering_context.read_to_image(rect) {
-                        // Apply transparency to allow frost effect to show through
-                        let pixels = apply_transparency(img.as_raw(), 200);
                         self.frame_handle =
-                            Some(Handle::from_rgba(size.width, size.height, pixels));
-                    }
+                            Some(Handle::from_rgba(size.width, size.height, img.as_raw().clone()));
+                    //}
                 }
                 app::Task::none()
             }
