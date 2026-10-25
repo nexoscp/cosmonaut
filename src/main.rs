@@ -57,6 +57,12 @@ enum Message {
     AboutUrlPressed(String),
 }
 
+impl From<WebViewMessage> for Message {
+    fn from(msg: WebViewMessage) -> Self {
+        // Required by WebViewWidget's type bounds for Element conversion
+        Message::WebView(segmented_button::Entity::default(), msg)
+    }
+}
 
 /// Menu actions for the menubar.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,15 +131,7 @@ impl TabState {
     }
 
     fn new_tab() -> Self {
-        Self {
-            browser: BrowserState {
-                url: String::new(),
-                title: None,
-                load_status: LoadStatus::Complete,
-                status_text: None,
-            },
-            history: History::default(),
-        }
+        Self::new("")
     }
 }
 
@@ -478,11 +476,8 @@ impl cosmic::Application for App {
                     if let Some(tab) = win.tab_state.get_mut(win.tab_id) {
                         tab.browser.url = url.clone();
                     }
-                    // Trigger navigation to the URL
-                    if let Some(tab) = win.tab_state.get(win.tab_id) {
-                        if let Some(webview) = win.get_current_webview() {
-                            webview::load_url(&mut webview.borrow_mut(), &tab.browser.url);
-                        }
+                    if let Some(webview) = win.get_current_webview() {
+                        webview::load_url(&mut webview.borrow_mut(), &url);
                     }
                 }
                 app::Task::none()
@@ -599,9 +594,8 @@ impl cosmic::Application for App {
 
         // Status bar
         let status_text = current_tab.browser.status_text.as_deref().unwrap_or("");
-        let status_bar = row![text(status_text)]
-            .padding(4)
-            .align_y(cosmic::iced::Alignment::Center);
+        let status_bar = widget::container(text(status_text))
+            .padding(4);
 
         // Tab content: URL bar, progress, webview, and status bar
         let tab_content = column![

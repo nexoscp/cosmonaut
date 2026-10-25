@@ -32,6 +32,7 @@ use url::Url;
 
 /// Events emitted by the Servo delegate callbacks.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum ServoEvent {
     UrlChanged(Url),
     TitleChanged(Option<String>),
@@ -61,14 +62,14 @@ pub enum WebViewMessage {
 
 /// State required to manage a Servo webview instance.
 pub struct WebViewState {
-    pub servo: Rc<Servo>,
-    pub rendering_context: Rc<dyn RenderingContext>,
-    pub webview: WebView,
-    pub frame_handle: Option<Handle>,
-    pub servo_event_receiver: iced::futures::channel::mpsc::UnboundedReceiver<ServoEvent>,
-    pub mouse_position: (f32, f32),
+    servo: Rc<Servo>,
+    rendering_context: Rc<dyn RenderingContext>,
+    webview: WebView,
+    frame_handle: Option<Handle>,
+    servo_event_receiver: iced::futures::channel::mpsc::UnboundedReceiver<ServoEvent>,
+    mouse_position: (f32, f32),
     /// Last known widget size from layout; used to detect resizes.
-    pub last_widget_size: Option<Size<u32>>,
+    last_widget_size: Option<Size<u32>>,
     /// Whether the frame needs to be recaptured on the next tick.
     frame_dirty: bool,
 }
@@ -272,7 +273,6 @@ where
         | Event::Mouse(mouse::Event::CursorLeft)
         | Event::Touch(touch::Event::FingerLost { .. }) = event
         {
-            let _was_hovered = widget_state.is_hovered;
             widget_state.is_hovered = cursor.is_over(bounds);
             widget_state.bounds = bounds;
 
@@ -355,8 +355,6 @@ where
         let bounds = layout.bounds();
 
         if let Some(handle) = &self.state.borrow().frame_handle {
-            let drawing_bounds = bounds;
-
             renderer.draw_image(
                 image::Image {
                     handle: handle.clone(),
@@ -366,7 +364,7 @@ where
                     opacity: 1.0,
                     snap: true,
                 },
-                drawing_bounds,
+                bounds,
                 bounds,
             );
         }
@@ -593,7 +591,7 @@ pub fn go_forward(state: &mut WebViewState, steps: usize) {
 
 /// Resize the rendering context to match the widget's current size.
 /// Returns `true` if the size changed and a repaint is needed.
-pub fn resize_if_needed(state: &mut WebViewState, widget_size: Size<u32>) -> bool {
+fn resize_if_needed(state: &mut WebViewState, widget_size: Size<u32>) -> bool {
     let current_size = state.rendering_context.size();
     let current = Size {
         width: current_size.width,
