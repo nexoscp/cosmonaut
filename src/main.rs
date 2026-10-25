@@ -16,9 +16,9 @@ use cosmic::{executor, iced, widget};
 use dpi::PhysicalSize;
 use servo::{
     Cursor, DeviceIntPoint, DeviceIntRect, DevicePoint, InputEvent, LoadStatus, MouseButton,
-    MouseButtonAction, MouseButtonEvent, MouseMoveEvent, RenderingContext, Servo, ServoBuilder,
-    SoftwareRenderingContext, WebView, WebViewBuilder, WebViewDelegate, WebViewPoint, WheelDelta,
-    WheelEvent, WheelMode,
+    MouseButtonAction, MouseButtonEvent, MouseMoveEvent, Preferences, RenderingContext, Servo,
+    ServoBuilder, SoftwareRenderingContext, WebView, WebViewBuilder, WebViewDelegate, WebViewPoint,
+    WheelDelta, WheelEvent, WheelMode,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -136,7 +136,11 @@ impl cosmic::Application for App {
     const APP_ID: &'static str = "nexos.Cosmonaut";
 
     fn init(core: Core, _flags: Self::Flags) -> (Self, app::Task<Message>) {
-        let servo = ServoBuilder::default().build();
+        // Create preferences with transparent background for frost effect
+        let mut preferences = Preferences::default();
+        preferences.shell_background_color_rgba = [0.0, 0.0, 0.0, 0.0];
+
+        let servo = ServoBuilder::default().preferences(preferences).build();
         servo.setup_logging();
 
         let initial_size = PhysicalSize { width: 800, height: 600 };
@@ -277,11 +281,7 @@ impl cosmic::Application for App {
                     }
                 }
 
-                // Check if a frame is ready
-              //  if self.frame_ready_flag.get() {
-              //      self.frame_ready_flag.set(false);
-
-                    // Paint and capture the frame
+         
                     self.webview.paint();
                     self.rendering_context.present();
                     let size = self.rendering_context.size();
