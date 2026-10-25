@@ -39,7 +39,7 @@ enum Message {
     /// Periodic tick to spin all webview event loops
     Tick,
     /// Webview widget messages (tagged with tab entity for per-tab webviews)
-    /// (Used for mouse/scroll events from the widget, not from subscriptions)
+    /// Mouse/scroll events from the widget are handled directly by the widget's on_message callback.
     #[allow(dead_code)]
     WebView(segmented_button::Entity, WebViewMessage),
     /// Window lifecycle events
@@ -51,20 +51,18 @@ enum Message {
     TabPoppedOut(segmented_button::Entity),
     /// Window state needs to move from temporary ID to real ID after window::open resolves
     WindowMoved(window::Id, window::Id),
+    /// Toggle the context drawer (About page)
+    ContextDrawerToggled,
+    /// URL link pressed in the About page
+    AboutUrlPressed(String),
 }
 
-impl From<WebViewMessage> for Message {
-    fn from(msg: WebViewMessage) -> Self {
-        // This is used by the WebViewWidget; the tab_id is added by the subscription
-        // Using a placeholder entity since the real tab_id comes from the subscription
-        Message::WebView(segmented_button::Entity::default(), msg)
-    }
-}
 
 /// Menu actions for the menubar.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MenuActionKind {
     NewTab,
+    About,
     Exit,
 }
 
@@ -74,6 +72,7 @@ impl Action for MenuActionKind {
     fn message(&self) -> Self::Message {
         match self {
             MenuActionKind::NewTab => Message::NewTab,
+            MenuActionKind::About => Message::ContextDrawerToggled,
             MenuActionKind::Exit => Message::Exit,
         }
     }
@@ -221,6 +220,8 @@ struct App {
     core: Core,
     /// Multi-window state: maps window ID to its window state
     windows: HashMap<window::Id, WindowState>,
+    /// About page data for the context drawer
+    about: cosmic::widget::about::About,
 }
 
 impl cosmic::Application for App {
@@ -236,10 +237,24 @@ impl cosmic::Application for App {
         let mut windows = HashMap::new();
         windows.insert(main_window_id, WindowState::new(initial_url));
 
+        let about = cosmic::widget::about::About::default()
+            .name("Cosmonaut")
+            .version("0.1.0")
+            .author("Nexos")
+            .developers(vec![("Nexos", "nexos@nexoscp.org")])
+            .license("MIT")
+            .license_url("https://opensource.org/licenses/MIT")
+            .links(vec![
+                ("Website", "https://github.com/nexoscp/cosmonaut"),
+                ("Source", "https://github.com/nexoscp/cosmonaut"),
+            ])
+            .comments("A web browser powered by Servo");
+
         (
             Self {
                 core,
                 windows,
+                about,
             },
             app::Task::none(),
         )
@@ -452,7 +467,36 @@ impl cosmic::Application for App {
                     app::Task::none()
                 }
             }
+            Message::ContextDrawerToggled => {
+                // Toggle the context drawer visibility
+                self.set_show_context(!self.core.window.show_context);
+                app::Task::none()
+            }
+            Message::AboutUrlPressed(url) => {
+                // Navigate the focused tab to the clicked URL
+                if let Some(win) = self.get_focused_window() {
+                    if let Some(tab) = win.tab_state.get_mut(win.tab_id) {
+                        tab.browser.url = url.clone();
+                    }
+                    // Trigger navigation to the URL
+                    if let Some(tab) = win.tab_state.get(win.tab_id) {
+                        if let Some(webview) = win.get_current_webview() {
+                            webview::load_url(&mut webview.borrow_mut(), &tab.browser.url);
+                        }
+                    }
+                }
+                app::Task::none()
+            }
         }
+    }
+
+    fn context_drawer(&self) -> Option<cosmic::app::ContextDrawer<'_, Message>> {
+        if !self.core.window.show_context {
+            return None;
+        }
+        let about_widget = cosmic::widget::about(&self.about, |url| Message::AboutUrlPressed(url.to_string()));
+        Some(cosmic::app::context_drawer(about_widget, Message::ContextDrawerToggled)
+            .title("About Cosmonaut"))
     }
 
     fn view_window(&self, id: window::Id) -> Element<'_, Message> {
@@ -463,13 +507,21 @@ impl cosmic::Application for App {
         let key_binds: HashMap<KeyBind, MenuActionKind> = HashMap::new();
         let file_menu = items(&key_binds, vec![
             Item::Button("New Tab", None, MenuActionKind::NewTab),
+        ]);
+        let help_menu = items(&key_binds, vec![
+            Item::Button("About", None, MenuActionKind::About),
             Item::Button("Exit", None, MenuActionKind::Exit),
         ]);
         let file_root: Element<'static, Message> = root("File").into();
+        let help_root: Element<'static, Message> = root("Help").into();
         let menu_bar_widget = bar(vec![
             Tree::with_children(
                 file_root,
                 file_menu,
+            ),
+            Tree::with_children(
+                help_root,
+                help_menu,
             ),
         ]);
         let menu_bar_element: Element<'_, Message> = menu_bar_widget.into();
