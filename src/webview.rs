@@ -69,6 +69,8 @@ pub struct WebViewState {
     pub mouse_position: (f32, f32),
     /// Last known widget size from layout; used to detect resizes.
     pub last_widget_size: Option<Size<u32>>,
+    /// Whether the frame needs to be recaptured on the next tick.
+    frame_dirty: bool,
 }
 
 impl WebViewState {
@@ -84,6 +86,13 @@ impl WebViewState {
         if let Some(img) = self.rendering_context.read_to_image(rect) {
             self.frame_handle = Some(Handle::from_rgba(size.width, size.height, img.as_raw().clone()));
         }
+        // Frame has been captured; clear the dirty flag.
+        self.frame_dirty = false;
+    }
+
+    /// Mark the frame as needing recapture on the next tick.
+    fn mark_frame_dirty(&mut self) {
+        self.frame_dirty = true;
     }
 
     /// Send an input event to the webview and spin the event loop.
@@ -415,8 +424,10 @@ impl Builder {
         self
     }
 
-    /// Build the Servo engine and webview state.
-    pub fn build(self) -> WebViewState {
+    /// Build a new Servo engine and webview state.
+    /// Returns the shared `Rc<Servo>` and the `WebViewState`.
+    /// Use this for the first tab in a window.
+    pub fn build(self) -> (Rc<Servo>, WebViewState) {
         let mut preferences = Preferences::default();
         if self.transparent_background {
             preferences.shell_background_color_rgba = [0.0, 0.0, 0.0, 0.0];
@@ -425,6 +436,14 @@ impl Builder {
         let servo = ServoBuilder::default().preferences(preferences).build();
         servo.setup_logging();
 
+        let servo_rc = Rc::new(servo);
+        let state = self.build_with_servo(Rc::clone(&servo_rc));
+        (servo_rc, state)
+    }
+
+    /// Build a webview state using an existing shared Servo engine.
+    /// Use this for additional tabs that share the same Servo instance.
+    pub fn build_with_servo(self, servo: Rc<Servo>) -> WebViewState {
         let initial_size = PhysicalSize {
             width: self.width,
             height: self.height,
@@ -450,17 +469,17 @@ impl Builder {
             }
         }
 
-        let servo_rc = Rc::new(servo);
-        servo_rc.spin_event_loop();
+        servo.spin_event_loop();
 
         let mut state = WebViewState {
-            servo: servo_rc,
+            servo,
             rendering_context: rendering_context_rc,
             webview,
             frame_handle: None,
             servo_event_receiver,
             mouse_position: (0.0, 0.0),
             last_widget_size: None,
+            frame_dirty: false,
         };
 
         // Paint and capture the initial frame
@@ -470,7 +489,7 @@ impl Builder {
 }
 
 /// Create a subscription that periodically spins Servo's event loop.
-pub fn subscription(_state: &WebViewState) -> Subscription<WebViewMessage> {
+pub fn subscription() -> Subscription<WebViewMessage> {
     every(Duration::from_millis(16)).map(|_| WebViewMessage::Tick)
 }
 
@@ -488,12 +507,19 @@ pub fn update(
             state.servo.spin_event_loop();
 
             // Process any pending Servo events from the channel
+            let mut needs_repaint = false;
             while let Ok(event) = state.servo_event_receiver.try_recv() {
+                // FrameReady events indicate the content has changed and needs repainting
+                if matches!(event, ServoEvent::FrameReady) {
+                    needs_repaint = true;
+                }
                 events.push(event);
             }
 
-            // Paint and capture the frame
-            state.capture_frame();
+            // Only paint and capture the frame when content actually changed
+            if needs_repaint || state.frame_dirty {
+                state.capture_frame();
+            }
         }
         WebViewMessage::MousePressed(button) => {
             let point = state.device_point();
@@ -503,6 +529,7 @@ pub fn update(
                 point,
             ));
             state.send_input_event(event);
+            state.mark_frame_dirty();
         }
         WebViewMessage::MouseReleased(button) => {
             let point = state.device_point();
@@ -512,6 +539,7 @@ pub fn update(
                 point,
             ));
             state.send_input_event(event);
+            state.mark_frame_dirty();
         }
         WebViewMessage::MouseMoved(x, y) => {
             state.mouse_position = (x, y);
@@ -531,6 +559,7 @@ pub fn update(
                 point,
             ));
             state.send_input_event(event);
+            state.mark_frame_dirty();
         }
     }
 
@@ -585,8 +614,9 @@ pub fn resize_if_needed(state: &mut WebViewState, widget_size: Size<u32>) -> boo
             // Replace the Rc with a new one
             state.rendering_context = Rc::new(new_context);
 
-            // Clear the frame handle as it's stale
+            // Clear the frame handle as it's stale and mark for repaint
             state.frame_handle = None;
+            state.mark_frame_dirty();
             true
         }
         Err(e) => {
