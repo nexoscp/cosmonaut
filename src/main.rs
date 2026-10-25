@@ -1,18 +1,21 @@
 mod webview;
 
+use std::collections::HashMap;
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use cosmic::app::{self, Core, Settings};
 use cosmic::iced::Length;
 use cosmic::iced::Subscription;
 use cosmic::iced::widget::column;
 use cosmic::iced::widget::progress_bar;
 use cosmic::prelude::*;
+use cosmic::widget::menu::{bar, items, root, Action, Item, KeyBind, Tree};
 use cosmic::widget::row;
 use cosmic::widget::text;
 use cosmic::widget::text_input;
 use cosmic::{executor, iced, widget};
 use servo::LoadStatus;
-use std::cell::RefCell;
-use std::rc::Rc;
 use url::Url;
 use webview::{ServoEvent, WebViewMessage};
 
@@ -23,6 +26,7 @@ enum Message {
     Go,
     Back,
     Forward,
+    Exit,
     /// Webview widget messages
     WebView(WebViewMessage),
 }
@@ -30,6 +34,22 @@ enum Message {
 impl From<WebViewMessage> for Message {
     fn from(msg: WebViewMessage) -> Self {
         Message::WebView(msg)
+    }
+}
+
+/// Menu actions for the menubar.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MenuActionKind {
+    Exit,
+}
+
+impl Action for MenuActionKind {
+    type Message = Message;
+
+    fn message(&self) -> Self::Message {
+        match self {
+            MenuActionKind::Exit => Message::Exit,
+        }
     }
 }
 
@@ -126,6 +146,9 @@ impl cosmic::Application for App {
                 }
                 app::Task::none()
             }
+            Message::Exit => {
+                std::process::exit(0);
+            }
             Message::WebView(webview_msg) => {
                 // Process webview messages and handle any Servo events
                 let events = webview::update(&mut self.webview_state.borrow_mut(), webview_msg);
@@ -138,6 +161,20 @@ impl cosmic::Application for App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        // Menu bar
+        let key_binds: HashMap<KeyBind, MenuActionKind> = HashMap::new();
+        let file_menu = items(&key_binds, vec![
+            Item::Button("Exit", None, MenuActionKind::Exit),
+        ]);
+        let file_root: Element<'static, Message> = root("File").into();
+        let menu_bar_widget = bar(vec![
+            Tree::with_children(
+                file_root,
+                file_menu,
+            ),
+        ]);
+        let menu_bar_element: Element<'_, Message> = menu_bar_widget.into();
+
         // Navigation buttons
         let back_button = widget::button::text("←")
             .on_press_maybe(self.history.can_go_back().then_some(Message::Back))
@@ -197,6 +234,7 @@ impl cosmic::Application for App {
             .align_y(cosmic::iced::Alignment::Center);
 
         column![
+            menu_bar_element,
             row![text(title_text)].padding(4),
             url_bar,
             progress,
