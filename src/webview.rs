@@ -3,6 +3,7 @@
 //! This module provides a self-contained widget that wraps the Servo browser engine
 //! and integrates it with libcosmic/iced's event loop by implementing the iced `Widget` trait.
 
+use cosmic::iced;
 use cosmic::iced::advanced::widget::Widget;
 use cosmic::iced::advanced::widget::{Tree, tree};
 use cosmic::iced::advanced::{Clipboard, Layout, Shell};
@@ -11,21 +12,20 @@ use cosmic::iced::core::layout;
 use cosmic::iced::core::mouse;
 use cosmic::iced::core::mouse::ScrollDelta;
 use cosmic::iced::core::renderer;
+use cosmic::iced::time::{Duration, every};
 use cosmic::iced::touch;
 use cosmic::iced::widget::image::Handle;
 use cosmic::iced::{
-    Element, Event, Length, Rectangle, Radians, Size, Subscription,
+    Element, Event, Length, Radians, Rectangle, Size, Subscription,
 };
-use cosmic::iced::time::{Duration, every};
-use cosmic::iced;
 use dpi::PhysicalSize;
+use servo::WebViewBuilder as ServoWebViewBuilder;
 use servo::{
     Cursor, DeviceIntPoint, DeviceIntRect, DevicePoint, InputEvent, LoadStatus, MouseButton,
     MouseButtonAction, MouseButtonEvent, MouseMoveEvent, Preferences, RenderingContext, Servo,
     ServoBuilder, SoftwareRenderingContext, WebView, WebViewDelegate, WebViewPoint,
     WheelDelta, WheelEvent, WheelMode,
 };
-use servo::WebViewBuilder as ServoWebViewBuilder;
 use std::cell::RefCell;
 use std::rc::Rc;
 use url::Url;
@@ -62,11 +62,51 @@ pub enum WebViewMessage {
 /// State required to manage a Servo webview instance.
 pub struct WebViewState {
     pub servo: Rc<Servo>,
-    pub rendering_context: Rc<SoftwareRenderingContext>,
+    pub rendering_context: Rc<dyn RenderingContext>,
     pub webview: WebView,
     pub frame_handle: Option<Handle>,
     pub servo_event_receiver: iced::futures::channel::mpsc::UnboundedReceiver<ServoEvent>,
     pub mouse_position: (f32, f32),
+    /// Last known widget size from layout; used to detect resizes.
+    pub last_widget_size: Option<Size<u32>>,
+}
+
+impl WebViewState {
+    /// Paint the webview and capture the current frame as an image handle.
+    fn capture_frame(&mut self) {
+        self.webview.paint();
+        self.rendering_context.present();
+        let size = self.rendering_context.size();
+        let rect = DeviceIntRect::new(
+            DeviceIntPoint::origin(),
+            DeviceIntPoint::new(size.width as i32, size.height as i32),
+        );
+        if let Some(img) = self.rendering_context.read_to_image(rect) {
+            self.frame_handle = Some(Handle::from_rgba(size.width, size.height, img.as_raw().clone()));
+        }
+    }
+
+    /// Send an input event to the webview and spin the event loop.
+    fn send_input_event(&mut self, event: InputEvent) {
+        self.webview.notify_input_event(event);
+        self.servo.spin_event_loop();
+    }
+
+    /// Get the current mouse position as a WebViewPoint.
+    fn device_point(&self) -> WebViewPoint {
+        let (x, y) = self.mouse_position;
+        WebViewPoint::Device(DevicePoint::new(x, y))
+    }
+}
+
+/// Map an iced mouse button to a Servo MouseButton.
+fn to_servo_button(button: mouse::Button) -> Option<MouseButton> {
+    match button {
+        mouse::Button::Left => Some(MouseButton::Primary),
+        mouse::Button::Right => Some(MouseButton::Secondary),
+        mouse::Button::Middle => Some(MouseButton::Auxiliary),
+        _ => None,
+    }
 }
 
 /// WebViewDelegate that sends events through an iced channel.
@@ -74,29 +114,35 @@ struct ServoDelegate {
     sender: Rc<RefCell<iced::futures::channel::mpsc::UnboundedSender<ServoEvent>>>,
 }
 
+impl ServoDelegate {
+    fn send(&self, event: ServoEvent) {
+        let _ = self.sender.borrow_mut().start_send(event);
+    }
+}
+
 impl WebViewDelegate for ServoDelegate {
     fn notify_new_frame_ready(&self, _webview: WebView) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::FrameReady);
+        self.send(ServoEvent::FrameReady);
     }
 
     fn notify_url_changed(&self, _webview: WebView, url: Url) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::UrlChanged(url));
+        self.send(ServoEvent::UrlChanged(url));
     }
 
     fn notify_page_title_changed(&self, _webview: WebView, title: Option<String>) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::TitleChanged(title));
+        self.send(ServoEvent::TitleChanged(title));
     }
 
     fn notify_load_status_changed(&self, _webview: WebView, status: LoadStatus) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::LoadStatusChanged(status));
+        self.send(ServoEvent::LoadStatusChanged(status));
     }
 
     fn notify_status_text_changed(&self, _webview: WebView, status: Option<String>) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::StatusTextChanged(status));
+        self.send(ServoEvent::StatusTextChanged(status));
     }
 
     fn notify_cursor_changed(&self, _webview: WebView, cursor: Cursor) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::CursorChanged(cursor));
+        self.send(ServoEvent::CursorChanged(cursor));
     }
 
     fn notify_history_changed(
@@ -105,7 +151,7 @@ impl WebViewDelegate for ServoDelegate {
         entries: Vec<Url>,
         current: usize,
     ) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::HistoryChanged(entries, current));
+        self.send(ServoEvent::HistoryChanged(entries, current));
     }
 
     fn notify_crashed(
@@ -114,11 +160,11 @@ impl WebViewDelegate for ServoDelegate {
         reason: String,
         backtrace: Option<String>,
     ) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::Crashed(reason, backtrace));
+        self.send(ServoEvent::Crashed(reason, backtrace));
     }
 
     fn notify_fullscreen_state_changed(&self, _webview: WebView, is_fullscreen: bool) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::FullscreenChanged(is_fullscreen));
+        self.send(ServoEvent::FullscreenChanged(is_fullscreen));
     }
 }
 
@@ -181,6 +227,19 @@ where
         limits: &layout::Limits,
     ) -> layout::Node {
         let size = limits.width(Length::Fill).height(Length::Fill).max();
+        // Check if the widget size changed and resize the rendering context
+        let widget_size = Size {
+            width: size.width as u32,
+            height: size.height as u32,
+        };
+        let mut state = self.state.borrow_mut();
+        if let Some(last) = state.last_widget_size {
+            if last != widget_size {
+                resize_if_needed(&mut state, widget_size);
+            }
+        }
+        state.last_widget_size = Some(widget_size);
+        drop(state);
         layout::Node::new(size)
     }
 
@@ -224,14 +283,10 @@ where
 
         // Handle mouse button press
         if let Event::Mouse(mouse::Event::ButtonPressed(button)) = event {
-            let servo_button = match button {
-                mouse::Button::Left => MouseButton::Primary,
-                mouse::Button::Right => MouseButton::Secondary,
-                mouse::Button::Middle => MouseButton::Auxiliary,
-                _ => return,
-            };
-            shell.publish(Message::from(WebViewMessage::MousePressed(servo_button)));
-            shell.capture_event();
+            if let Some(servo_button) = to_servo_button(*button) {
+                shell.publish(Message::from(WebViewMessage::MousePressed(servo_button)));
+                shell.capture_event();
+            }
         }
 
         // Handle touch press
@@ -242,13 +297,9 @@ where
 
         // Handle mouse button release
         if let Event::Mouse(mouse::Event::ButtonReleased(button)) = event {
-            let servo_button = match button {
-                mouse::Button::Left => MouseButton::Primary,
-                mouse::Button::Right => MouseButton::Secondary,
-                mouse::Button::Middle => MouseButton::Auxiliary,
-                _ => return,
-            };
-            shell.publish(Message::from(WebViewMessage::MouseReleased(servo_button)));
+            if let Some(servo_button) = to_servo_button(*button) {
+                shell.publish(Message::from(WebViewMessage::MouseReleased(servo_button)));
+            }
         }
 
         // Handle touch release
@@ -380,7 +431,7 @@ impl Builder {
         };
         let rendering_context = SoftwareRenderingContext::new(initial_size)
             .expect("Failed to create SoftwareRenderingContext");
-        let rendering_context_rc = Rc::new(rendering_context);
+        let rendering_context_rc: Rc<dyn RenderingContext> = Rc::new(rendering_context);
 
         let (servo_event_sender, servo_event_receiver) =
             iced::futures::channel::mpsc::unbounded::<ServoEvent>();
@@ -388,7 +439,7 @@ impl Builder {
         let delegate = Rc::new(ServoDelegate {
             sender: Rc::new(RefCell::new(servo_event_sender)),
         });
-        let webview = ServoWebViewBuilder::new(&servo, rendering_context_rc.clone())
+        let webview = ServoWebViewBuilder::new(&servo, Rc::clone(&rendering_context_rc))
             .delegate(delegate)
             .build();
 
@@ -402,33 +453,19 @@ impl Builder {
         let servo_rc = Rc::new(servo);
         servo_rc.spin_event_loop();
 
-        // Paint and capture the initial frame
-        webview.paint();
-        let mut frame_handle = None;
-        {
-            rendering_context_rc.present();
-            let size = rendering_context_rc.size();
-            let rect = DeviceIntRect::new(
-                DeviceIntPoint::origin(),
-                DeviceIntPoint::new(size.width as i32, size.height as i32),
-            );
-            if let Some(img) = rendering_context_rc.read_to_image(rect) {
-                frame_handle = Some(Handle::from_rgba(
-                    size.width,
-                    size.height,
-                    img.as_raw().clone(),
-                ));
-            }
-        }
-
-        WebViewState {
+        let mut state = WebViewState {
             servo: servo_rc,
             rendering_context: rendering_context_rc,
             webview,
-            frame_handle,
+            frame_handle: None,
             servo_event_receiver,
             mouse_position: (0.0, 0.0),
-        }
+            last_widget_size: None,
+        };
+
+        // Paint and capture the initial frame
+        state.capture_frame();
+        state
     }
 }
 
@@ -455,50 +492,35 @@ pub fn update(
                 events.push(event);
             }
 
-            // Always paint and capture the frame
-            state.webview.paint();
-            state.rendering_context.present();
-            let size = state.rendering_context.size();
-            let rect = DeviceIntRect::new(
-                DeviceIntPoint::origin(),
-                DeviceIntPoint::new(size.width as i32, size.height as i32),
-            );
-            if let Some(img) = state.rendering_context.read_to_image(rect) {
-                state.frame_handle =
-                    Some(Handle::from_rgba(size.width, size.height, img.as_raw().clone()));
-            }
+            // Paint and capture the frame
+            state.capture_frame();
         }
         WebViewMessage::MousePressed(button) => {
-            let (x, y) = state.mouse_position;
-            let point = WebViewPoint::Device(DevicePoint::new(x, y));
+            let point = state.device_point();
             let event = InputEvent::MouseButton(MouseButtonEvent::new(
                 MouseButtonAction::Down,
                 button,
                 point,
             ));
-            state.webview.notify_input_event(event);
-            state.servo.spin_event_loop();
+            state.send_input_event(event);
         }
         WebViewMessage::MouseReleased(button) => {
-            let (x, y) = state.mouse_position;
-            let point = WebViewPoint::Device(DevicePoint::new(x, y));
+            let point = state.device_point();
             let event = InputEvent::MouseButton(MouseButtonEvent::new(
                 MouseButtonAction::Up,
                 button,
                 point,
             ));
-            state.webview.notify_input_event(event);
-            state.servo.spin_event_loop();
+            state.send_input_event(event);
         }
         WebViewMessage::MouseMoved(x, y) => {
             state.mouse_position = (x, y);
-            let point = WebViewPoint::Device(DevicePoint::new(x, y));
+            let point = state.device_point();
             let event = InputEvent::MouseMove(MouseMoveEvent::new(point));
             state.webview.notify_input_event(event);
         }
         WebViewMessage::Scrolled(dx, dy) => {
-            let (x, y) = state.mouse_position;
-            let point = WebViewPoint::Device(DevicePoint::new(x, y));
+            let point = state.device_point();
             let event = InputEvent::Wheel(WheelEvent::new(
                 WheelDelta {
                     x: dx,
@@ -508,8 +530,7 @@ pub fn update(
                 },
                 point,
             ));
-            state.webview.notify_input_event(event);
-            state.servo.spin_event_loop();
+            state.send_input_event(event);
         }
     }
 
@@ -539,4 +560,38 @@ pub fn go_back(state: &mut WebViewState, steps: usize) {
 pub fn go_forward(state: &mut WebViewState, steps: usize) {
     state.webview.go_forward(steps);
     state.servo.spin_event_loop();
+}
+
+/// Resize the rendering context to match the widget's current size.
+/// Returns `true` if the size changed and a repaint is needed.
+pub fn resize_if_needed(state: &mut WebViewState, widget_size: Size<u32>) -> bool {
+    let current_size = state.rendering_context.size();
+    let current = Size {
+        width: current_size.width,
+        height: current_size.height,
+    };
+
+    if current == widget_size {
+        return false;
+    }
+
+    // Recreate the rendering context at the new size
+    let new_size = PhysicalSize {
+        width: widget_size.width,
+        height: widget_size.height,
+    };
+    match SoftwareRenderingContext::new(new_size) {
+        Ok(new_context) => {
+            // Replace the Rc with a new one
+            state.rendering_context = Rc::new(new_context);
+
+            // Clear the frame handle as it's stale
+            state.frame_handle = None;
+            true
+        }
+        Err(e) => {
+            eprintln!("Failed to resize rendering context: {:?}", e);
+            false
+        }
+    }
 }

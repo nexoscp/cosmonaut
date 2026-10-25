@@ -33,14 +33,35 @@ impl From<WebViewMessage> for Message {
     }
 }
 
-struct App {
-    core: Core,
+/// Manages browser navigation history.
+#[derive(Default)]
+struct History {
+    entries: Vec<Url>,
+    current: usize,
+}
+
+impl History {
+    fn can_go_back(&self) -> bool {
+        self.current > 0
+    }
+
+    fn can_go_forward(&self) -> bool {
+        self.current < self.entries.len().saturating_sub(1)
+    }
+}
+
+/// Groups browser state fields updated by Servo events.
+struct BrowserState {
     url: String,
     title: Option<String>,
     load_status: LoadStatus,
     status_text: Option<String>,
-    history_entries: Vec<Url>,
-    history_current: usize,
+}
+
+struct App {
+    core: Core,
+    browser: BrowserState,
+    history: History,
     webview_state: Rc<RefCell<webview::WebViewState>>,
 }
 
@@ -65,12 +86,13 @@ impl cosmic::Application for App {
         (
             Self {
                 core,
-                url: initial_url.to_string(),
-                title: None,
-                load_status: LoadStatus::Complete,
-                status_text: None,
-                history_entries: Vec::new(),
-                history_current: 0,
+                browser: BrowserState {
+                    url: initial_url.to_string(),
+                    title: None,
+                    load_status: LoadStatus::Complete,
+                    status_text: None,
+                },
+                history: History::default(),
                 webview_state,
             },
             app::Task::none(),
@@ -85,21 +107,21 @@ impl cosmic::Application for App {
     fn update(&mut self, message: Message) -> app::Task<Message> {
         match message {
             Message::UrlChanged(u) => {
-                self.url = u;
+                self.browser.url = u;
                 app::Task::none()
             }
             Message::Go => {
-                webview::load_url(&mut self.webview_state.borrow_mut(), &self.url);
+                webview::load_url(&mut self.webview_state.borrow_mut(), &self.browser.url);
                 app::Task::none()
             }
             Message::Back => {
-                if self.history_current > 0 {
+                if self.history.can_go_back() {
                     webview::go_back(&mut self.webview_state.borrow_mut(), 1);
                 }
                 app::Task::none()
             }
             Message::Forward => {
-                if self.history_current < self.history_entries.len().saturating_sub(1) {
+                if self.history.can_go_forward() {
                     webview::go_forward(&mut self.webview_state.borrow_mut(), 1);
                 }
                 app::Task::none()
@@ -118,27 +140,32 @@ impl cosmic::Application for App {
     fn view(&self) -> Element<'_, Message> {
         // Navigation buttons
         let back_button = widget::button::text("←")
-            .on_press_maybe(can_go_back(self).then_some(Message::Back))
+            .on_press_maybe(self.history.can_go_back().then_some(Message::Back))
             .padding(4);
         let forward_button = widget::button::text("→")
-            .on_press_maybe(can_go_forward(self).then_some(Message::Forward))
+            .on_press_maybe(self.history.can_go_forward().then_some(Message::Forward))
             .padding(4);
 
-        // URL bar
-        let url_input = text_input("https://", &self.url)
+        // URL bar with adaptive placeholder
+        let placeholder = if self.browser.url.starts_with("http://") {
+            "http://"
+        } else {
+            "https://"
+        };
+        let url_input = text_input(placeholder, &self.browser.url)
             .on_input(Message::UrlChanged)
             .on_submit(|_| Message::Go);
         let go_button = widget::button::text("Go").on_press(Message::Go);
 
         // Title display
-        let title_text = self.title.as_deref().unwrap_or("");
+        let title_text = self.browser.title.as_deref().unwrap_or("");
 
         let url_bar = row![back_button, forward_button, url_input, go_button,]
             .padding(8)
             .spacing(8);
 
-        // Progress bar
-        let progress: Element<'_, Message> = match &self.load_status {
+        // Progress bar - hidden when loading is complete
+        let progress: Element<'_, Message> = match &self.browser.load_status {
             LoadStatus::Started | LoadStatus::HeadParsed => {
                 let pb = progress_bar(0.0..=1.0, 0.5);
                 widget::container(pb)
@@ -154,12 +181,17 @@ impl cosmic::Application for App {
             }
         };
 
-        // Webview content - use the Widget implementation
+        // Webview content - centered in available space
         let webview_widget = webview::WebViewWidget::new(Rc::clone(&self.webview_state));
-        let webview_content: Element<'_, Message> = webview_widget.into();
+        let webview_content: Element<'_, Message> = widget::container(webview_widget)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into();
 
         // Status bar
-        let status_text = self.status_text.as_deref().unwrap_or("");
+        let status_text = self.browser.status_text.as_deref().unwrap_or("");
         let status_bar = row![text(status_text)]
             .padding(4)
             .align_y(cosmic::iced::Alignment::Center);
@@ -190,47 +222,32 @@ impl App {
     fn handle_servo_event(&mut self, event: ServoEvent) {
         match event {
             ServoEvent::UrlChanged(url) => {
-                self.url = url.to_string();
+                self.browser.url = url.to_string();
             }
             ServoEvent::TitleChanged(title) => {
-                self.title = title;
+                self.browser.title = title;
             }
             ServoEvent::LoadStatusChanged(status) => {
-                self.load_status = status;
+                self.browser.load_status = status;
             }
             ServoEvent::StatusTextChanged(status) => {
-                self.status_text = status;
-            }
-            ServoEvent::CursorChanged(_cursor) => {
-                // Cursor changes could be handled here in the future
+                self.browser.status_text = status;
             }
             ServoEvent::HistoryChanged(entries, current) => {
-                self.history_entries = entries;
-                self.history_current = current;
-            }
-            ServoEvent::FrameReady => {
-                // Frame ready is handled by the update function
+                self.history.entries = entries;
+                self.history.current = current;
             }
             ServoEvent::Crashed(reason, _backtrace) => {
                 eprintln!("Servo crashed: {}", reason);
             }
-            ServoEvent::FullscreenChanged(_is_fullscreen) => {
-                // Fullscreen changes could be handled here in the future
-            }
+            // Cursor, fullscreen, and frame events are not yet handled
+            ServoEvent::CursorChanged(_)
+            | ServoEvent::FrameReady
+            | ServoEvent::FullscreenChanged(_) => {}
         }
     }
 }
 
 fn main() -> iced::Result {
     app::run::<App>(Settings::default(), ())
-}
-
-/// Check if we can navigate back
-fn can_go_back(app: &App) -> bool {
-    app.history_current > 0
-}
-
-/// Check if we can navigate forward
-fn can_go_forward(app: &App) -> bool {
-    app.history_current < app.history_entries.len().saturating_sub(1)
 }
