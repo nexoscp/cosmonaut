@@ -136,8 +136,8 @@ impl cosmic::Application for App {
     const APP_ID: &'static str = "nexos.Cosmonaut";
 
     fn init(core: Core, _flags: Self::Flags) -> (Self, app::Task<Message>) {
-        // Create preferences with transparent background for frost effect
         let mut preferences = Preferences::default();
+        // Create preferences with transparent background for frost effect
         preferences.shell_background_color_rgba = [0.0, 0.0, 0.0, 0.0];
 
         let servo = ServoBuilder::default().preferences(preferences).build();
@@ -281,7 +281,7 @@ impl cosmic::Application for App {
                     }
                 }
 
-         
+
                     self.webview.paint();
                     self.rendering_context.present();
                     let size = self.rendering_context.size();
