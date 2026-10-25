@@ -1,42 +1,20 @@
+mod webview;
+
 use cosmic::app::{self, Core, Settings};
 use cosmic::iced::Length;
-use cosmic::iced::Point;
 use cosmic::iced::Subscription;
-use cosmic::iced::mouse::ScrollDelta;
-use cosmic::iced::time::{Duration, every};
 use cosmic::iced::widget::column;
-use cosmic::iced::widget::image;
-use cosmic::iced::widget::image::Handle;
 use cosmic::iced::widget::progress_bar;
 use cosmic::prelude::*;
 use cosmic::widget::row;
 use cosmic::widget::text;
 use cosmic::widget::text_input;
 use cosmic::{executor, iced, widget};
-use dpi::PhysicalSize;
-use servo::{
-    Cursor, DeviceIntPoint, DeviceIntRect, DevicePoint, InputEvent, LoadStatus, MouseButton,
-    MouseButtonAction, MouseButtonEvent, MouseMoveEvent, Preferences, RenderingContext, Servo,
-    ServoBuilder, SoftwareRenderingContext, WebView, WebViewBuilder, WebViewDelegate, WebViewPoint,
-    WheelDelta, WheelEvent, WheelMode,
-};
+use servo::LoadStatus;
 use std::cell::RefCell;
 use std::rc::Rc;
 use url::Url;
-
-/// Events from Servo's delegate callbacks
-#[derive(Clone, Debug)]
-enum ServoEvent {
-    UrlChanged(Url),
-    TitleChanged(Option<String>),
-    LoadStatusChanged(LoadStatus),
-    StatusTextChanged(Option<String>),
-    CursorChanged(Cursor),
-    HistoryChanged(Vec<Url>, usize),
-    FrameReady,
-    Crashed(String, Option<String>),
-    FullscreenChanged(bool),
-}
+use webview::{ServoEvent, WebViewMessage};
 
 /// Messages from the UI
 #[derive(Clone, Debug)]
@@ -45,16 +23,14 @@ enum Message {
     Go,
     Back,
     Forward,
-    /// Periodic tick to spin Servo's event loop
-    Tick, //TODO remove, we do have a channel
-    /// Mouse button pressed on webview
-    MousePressed(MouseButton),
-    /// Mouse button released on webview
-    MouseReleased(MouseButton),
-    /// Mouse moved over webview
-    MouseMoved(f32, f32),
-    /// Mouse wheel scrolled over webview
-    Scrolled(f64, f64),
+    /// Webview widget messages
+    WebView(WebViewMessage),
+}
+
+impl From<WebViewMessage> for Message {
+    fn from(msg: WebViewMessage) -> Self {
+        Message::WebView(msg)
+    }
 }
 
 struct App {
@@ -65,68 +41,7 @@ struct App {
     status_text: Option<String>,
     history_entries: Vec<Url>,
     history_current: usize,
-    servo: Rc<Servo>,
-    rendering_context: Rc<SoftwareRenderingContext>,
-    webview: WebView,
-    frame_handle: Option<Handle>,
-    /// Channel receiver for Servo events
-    servo_event_receiver: iced::futures::channel::mpsc::UnboundedReceiver<ServoEvent>,
-    /// Current mouse position relative to the webview
-    mouse_position: (f32, f32),
-}
-
-/// WebViewDelegate that sends events through a channel
-struct ServoDelegate {
-    sender: Rc<RefCell<iced::futures::channel::mpsc::UnboundedSender<ServoEvent>>>,
-}
-
-impl WebViewDelegate for ServoDelegate {
-    fn notify_new_frame_ready(&self, _webview: WebView) {
-        //self.flag.set(true);
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::FrameReady);
-    }
-
-    fn notify_url_changed(&self, _webview: WebView, url: Url) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::UrlChanged(url));
-    }
-
-    fn notify_page_title_changed(&self, _webview: WebView, title: Option<String>) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::TitleChanged(title));
-    }
-
-    fn notify_load_status_changed(&self, _webview: WebView, status: LoadStatus) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::LoadStatusChanged(status));
-    }
-
-    fn notify_status_text_changed(&self, _webview: WebView, status: Option<String>) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::StatusTextChanged(status));
-    }
-
-    fn notify_cursor_changed(&self, _webview: WebView, cursor: Cursor) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::CursorChanged(cursor));
-    }
-
-    fn notify_history_changed(
-        &self,
-        _webview: WebView,
-        entries: Vec<Url>,
-        current: usize,
-    ) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::HistoryChanged(entries, current));
-    }
-
-    fn notify_crashed(
-        &self,
-        _webview: WebView,
-        reason: String,
-        backtrace: Option<String>,
-    ) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::Crashed(reason, backtrace));
-    }
-
-    fn notify_fullscreen_state_changed(&self, _webview: WebView, is_fullscreen: bool) {
-        let _ = self.sender.borrow_mut().start_send(ServoEvent::FullscreenChanged(is_fullscreen));
-    }
+    webview_state: Rc<RefCell<webview::WebViewState>>,
 }
 
 impl cosmic::Application for App {
@@ -136,52 +51,16 @@ impl cosmic::Application for App {
     const APP_ID: &'static str = "nexos.Cosmonaut";
 
     fn init(core: Core, _flags: Self::Flags) -> (Self, app::Task<Message>) {
-        let mut preferences = Preferences::default();
-        // Create preferences with transparent background for frost effect
-        preferences.shell_background_color_rgba = [0.0, 0.0, 0.0, 0.0];
-
-        let servo = ServoBuilder::default().preferences(preferences).build();
-        servo.setup_logging();
-
-        let initial_size = PhysicalSize { width: 800, height: 600 };
-        let rendering_context = SoftwareRenderingContext::new(initial_size)
-            .expect("Failed to create SoftwareRenderingContext");
-        let rendering_context_rc = Rc::new(rendering_context);
-
-
-        let (servo_event_sender, servo_event_receiver) =
-            iced::futures::channel::mpsc::unbounded::<ServoEvent>();
-
-        let delegate = Rc::new(ServoDelegate {
-            sender: Rc::new(RefCell::new(servo_event_sender)),
-        });
-        let webview = WebViewBuilder::new(&servo, rendering_context_rc.clone())
-            .delegate(delegate)
-            .build();
-
         let initial_url = "https://github.com/nexoscp/";
-        if let Ok(u) = Url::parse(initial_url) {
-            webview.load(u);
-        }
 
-        let servo_rc = Rc::new(servo);
-
-            servo_rc.spin_event_loop();
-
-        // Paint and capture the initial frame
-        webview.paint();
-        let mut frame_handle = None;
-        {
-            rendering_context_rc.present();
-            let size = rendering_context_rc.size();
-            let rect = DeviceIntRect::new(
-                DeviceIntPoint::origin(),
-                DeviceIntPoint::new(size.width as i32, size.height as i32),
-            );
-            if let Some(img) = rendering_context_rc.read_to_image(rect) {
-                frame_handle = Some(Handle::from_rgba(size.width, size.height, img.as_raw().clone()));
-            }
-        }
+        // Build the webview using the extracted module
+        let webview_state = Rc::new(RefCell::new(
+            webview::Builder::default()
+                .initial_url(initial_url)
+                .transparent_background(true)
+                .size(800, 600)
+                .build(),
+        ));
 
         (
             Self {
@@ -192,21 +71,15 @@ impl cosmic::Application for App {
                 status_text: None,
                 history_entries: Vec::new(),
                 history_current: 0,
-                servo: servo_rc,
-                rendering_context: rendering_context_rc,
-                webview,
-                frame_handle,
-                //frame_ready_flag,
-                servo_event_receiver,
-                mouse_position: (0.0, 0.0),
+                webview_state,
             },
             app::Task::none(),
         )
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        // Periodic tick to keep Servo's event loop running
-        every(Duration::from_millis(16)).map(|_| Message::Tick)
+        // Use the webview module's subscription for periodic ticks
+        webview::subscription(&self.webview_state.borrow()).map(Message::WebView)
     }
 
     fn update(&mut self, message: Message) -> app::Task<Message> {
@@ -216,131 +89,27 @@ impl cosmic::Application for App {
                 app::Task::none()
             }
             Message::Go => {
-                let url_str = if self.url.starts_with("http://") || self.url.starts_with("https://")
-                {
-                    self.url.clone()
-                } else {
-                    format!("https://{}", self.url)
-                };
-                if let Ok(u) = Url::parse(&url_str) {
-                    self.webview.load(u);
-                }
-                // Spin once to start processing
-                self.servo.spin_event_loop();
+                webview::load_url(&mut self.webview_state.borrow_mut(), &self.url);
                 app::Task::none()
             }
             Message::Back => {
                 if self.history_current > 0 {
-                    self.webview.go_back(1);
-                    self.servo.spin_event_loop();
+                    webview::go_back(&mut self.webview_state.borrow_mut(), 1);
                 }
                 app::Task::none()
             }
             Message::Forward => {
                 if self.history_current < self.history_entries.len().saturating_sub(1) {
-                    self.webview.go_forward(1);
-                    self.servo.spin_event_loop();
+                    webview::go_forward(&mut self.webview_state.borrow_mut(), 1);
                 }
                 app::Task::none()
             }
-            Message::Tick => {
-                // Spin Servo's event loop
-                self.servo.spin_event_loop();
-
-                // Process any pending Servo events from the channel
-                while let Ok(event) = self.servo_event_receiver.try_recv() {
-                    match event {
-                        ServoEvent::UrlChanged(url) => {
-                            self.url = url.to_string();
-                        }
-                        ServoEvent::TitleChanged(title) => {
-                            self.title = title;
-                        }
-                        ServoEvent::LoadStatusChanged(status) => {
-                            self.load_status = status;
-                        }
-                        ServoEvent::StatusTextChanged(status) => {
-                            self.status_text = status;
-                        }
-                        ServoEvent::CursorChanged(_cursor) => {
-                            // Cursor changes could be handled here in the future
-                        }
-                        ServoEvent::HistoryChanged(entries, current) => {
-                            self.history_entries = entries;
-                            self.history_current = current;
-                        }
-                        ServoEvent::FrameReady => {
-                            // Frame ready is also handled via the flag below
-                        }
-                        ServoEvent::Crashed(reason, _backtrace) => {
-                            eprintln!("Servo crashed: {}", reason);
-                        }
-                        ServoEvent::FullscreenChanged(_is_fullscreen) => {
-                            // Fullscreen changes could be handled here in the future
-                        }
-                    }
+            Message::WebView(webview_msg) => {
+                // Process webview messages and handle any Servo events
+                let events = webview::update(&mut self.webview_state.borrow_mut(), webview_msg);
+                for event in events {
+                    self.handle_servo_event(event);
                 }
-
-
-                    self.webview.paint();
-                    self.rendering_context.present();
-                    let size = self.rendering_context.size();
-                    let rect = DeviceIntRect::new(
-                        DeviceIntPoint::origin(),
-                        DeviceIntPoint::new(size.width as i32, size.height as i32),
-                    );
-                    if let Some(img) = self.rendering_context.read_to_image(rect) {
-                        self.frame_handle =
-                            Some(Handle::from_rgba(size.width, size.height, img.as_raw().clone()));
-                    //}
-                }
-                app::Task::none()
-            }
-            Message::MousePressed(button) => {
-                let (x, y) = self.mouse_position;
-                let point = WebViewPoint::Device(DevicePoint::new(x, y));
-                let event = InputEvent::MouseButton(MouseButtonEvent::new(
-                    MouseButtonAction::Down,
-                    button,
-                    point,
-                ));
-                self.webview.notify_input_event(event);
-                self.servo.spin_event_loop();
-                app::Task::none()
-            }
-            Message::MouseReleased(button) => {
-                let (x, y) = self.mouse_position;
-                let point = WebViewPoint::Device(DevicePoint::new(x, y));
-                let event = InputEvent::MouseButton(MouseButtonEvent::new(
-                    MouseButtonAction::Up,
-                    button,
-                    point,
-                ));
-                self.webview.notify_input_event(event);
-                self.servo.spin_event_loop();
-                app::Task::none()
-            }
-            Message::MouseMoved(x, y) => {
-                self.mouse_position = (x, y);
-                let point = WebViewPoint::Device(DevicePoint::new(x, y));
-                let event = InputEvent::MouseMove(MouseMoveEvent::new(point));
-                self.webview.notify_input_event(event);
-                app::Task::none()
-            }
-            Message::Scrolled(dx, dy) => {
-                let (x, y) = self.mouse_position;
-                let point = WebViewPoint::Device(DevicePoint::new(x, y));
-                let event = InputEvent::Wheel(WheelEvent::new(
-                    WheelDelta {
-                        x: dx,
-                        y: dy,
-                        z: 0.0,
-                        mode: WheelMode::DeltaPixel,
-                    },
-                    point,
-                ));
-                self.webview.notify_input_event(event);
-                self.servo.spin_event_loop();
                 app::Task::none()
             }
         }
@@ -385,42 +154,9 @@ impl cosmic::Application for App {
             }
         };
 
-        let webview_content: Element<'_, Message> = match &self.frame_handle {
-            Some(handle) => {
-                let img = image::Image::new(handle.clone())
-                    .width(Length::Fill)
-                    .height(Length::Fill);
-
-                // Wrap in MouseArea to capture mouse events
-                let interactive = widget::MouseArea::new(img)
-                    .on_press(Message::MousePressed(MouseButton::Primary))
-                    .on_release(Message::MouseReleased(MouseButton::Primary))
-                    .on_right_press(Message::MousePressed(MouseButton::Secondary))
-                    .on_right_release(Message::MouseReleased(MouseButton::Secondary))
-                    .on_middle_press(Message::MousePressed(MouseButton::Auxiliary))
-                    .on_middle_release(Message::MouseReleased(MouseButton::Auxiliary))
-                    .on_move(|pos: Point| Message::MouseMoved(pos.x, pos.y))
-                    .on_scroll(|delta: ScrollDelta| {
-                        match delta {
-                            ScrollDelta::Lines { x, y } => {
-                                Message::Scrolled(x as f64 * 76.0, y as f64 * 76.0)
-                            }
-                            ScrollDelta::Pixels { x, y } => {
-                                Message::Scrolled(x as f64, y as f64)
-                            }
-                        }
-                    });
-
-                widget::container(interactive)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into()
-            }
-            None => widget::container(text("Loading..."))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into(),
-        };
+        // Webview content - use the Widget implementation
+        let webview_widget = webview::WebViewWidget::new(Rc::clone(&self.webview_state));
+        let webview_content: Element<'_, Message> = webview_widget.into();
 
         // Status bar
         let status_text = self.status_text.as_deref().unwrap_or("");
@@ -446,6 +182,42 @@ impl cosmic::Application for App {
 
     fn core_mut(&mut self) -> &mut Core {
         &mut self.core
+    }
+}
+
+impl App {
+    /// Handle events from the Servo delegate
+    fn handle_servo_event(&mut self, event: ServoEvent) {
+        match event {
+            ServoEvent::UrlChanged(url) => {
+                self.url = url.to_string();
+            }
+            ServoEvent::TitleChanged(title) => {
+                self.title = title;
+            }
+            ServoEvent::LoadStatusChanged(status) => {
+                self.load_status = status;
+            }
+            ServoEvent::StatusTextChanged(status) => {
+                self.status_text = status;
+            }
+            ServoEvent::CursorChanged(_cursor) => {
+                // Cursor changes could be handled here in the future
+            }
+            ServoEvent::HistoryChanged(entries, current) => {
+                self.history_entries = entries;
+                self.history_current = current;
+            }
+            ServoEvent::FrameReady => {
+                // Frame ready is handled by the update function
+            }
+            ServoEvent::Crashed(reason, _backtrace) => {
+                eprintln!("Servo crashed: {}", reason);
+            }
+            ServoEvent::FullscreenChanged(_is_fullscreen) => {
+                // Fullscreen changes could be handled here in the future
+            }
+        }
     }
 }
 
