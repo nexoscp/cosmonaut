@@ -30,6 +30,8 @@ https://uapi-group.org/specifications/specs/varlink/
 ## Desktop Entry Specification
 https://www.freedesktop.org/wiki/Specifications/desktop-entry-spec/
 
+use "DBusActivatable", "Interfaces"
+
 ## Media Player Remote Interfacing Specification
 https://www.freedesktop.org/wiki/Specifications/mpris-spec/
 
@@ -59,3 +61,6 @@ https://flatpak.github.io/xdg-desktop-portal/docs/api-reference.html
 
 ## Wayland
 https://gitlab.freedesktop.org/wayland/wayland-protocols/-/tree/main/staging?ref_type=heads
+
+## systemd stuf, need to understand
+https://github.com/pop-os/libcosmic/pull/1481
