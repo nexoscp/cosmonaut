@@ -7,6 +7,8 @@ license = "MPL-2.0"
 publish = false
 readme = "README.md"
 description = "Servo browser engine with libcosmic shell"
+repository = "https://github.com/nexoscp/cosmonaut"
+keywords=["servo", "libcosmic"]
 
 [dependencies]
 dpi = "0.1.2"

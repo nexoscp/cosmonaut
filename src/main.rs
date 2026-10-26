@@ -15,7 +15,7 @@ use cosmic::iced::widget::column;
 use cosmic::iced::widget::progress_bar;
 use cosmic::iced::window;
 use cosmic::prelude::*;
-use cosmic::widget::menu::{Action, Item, KeyBind, Tree, bar, items, root};
+use cosmic::widget::menu::{Item, KeyBind, Tree, bar, items, root};
 use cosmic::widget::row;
 use cosmic::widget::segmented_button::{self, SecondaryMap};
 use cosmic::widget::tab_bar;
