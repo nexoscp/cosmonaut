@@ -1,8 +1,10 @@
 [Desktop Entry]
 Type=Application
 Name=Cosmonaut
-Comment=Servo browser engine with libcosmic chrome
+GenericName=Web Browser
+Comment="View sites on the Internet"
 Exec=cosmonaut
 Icon=cosmonaut.png
 Terminal=false
 Categories=Network;WebBrowser;
+MimeType=text/html
