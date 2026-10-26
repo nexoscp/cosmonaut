@@ -19,6 +19,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history and tags for cargo-bump
 
       - name: Install system dependencies
         run: |
@@ -42,13 +44,19 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Bump version from git tag
+        if: github.event_name == 'release'
+        uses: tj-actions/cargo-bump@v3
+
       - name: Install cargo-deb
+        if: github.event_name == 'release'
         run: cargo install cargo-deb
 
       - name: Build release binary
         run: cargo build --release --verbose
 
       - name: Build deb package
+        if: github.event_name == 'release'
         run: cargo deb --verbose
 
       - name: Upload executable artifact
