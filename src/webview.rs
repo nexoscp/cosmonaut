@@ -3,6 +3,11 @@
 //! This module provides a self-contained widget that wraps the Servo browser engine
 //! and integrates it with libcosmic/iced's event loop by implementing the iced `Widget` trait.
 
+pub use servo::RenderingContext;
+pub use servo::WebView;
+
+pub use cosmic::widget::segmented_button;
+
 use cosmic::iced;
 use cosmic::iced::advanced::widget::Widget;
 use cosmic::iced::advanced::widget::{Tree, tree};
@@ -22,8 +27,8 @@ use dpi::PhysicalSize;
 use servo::WebViewBuilder as ServoWebViewBuilder;
 use servo::{
     Cursor, DeviceIntPoint, DeviceIntRect, DevicePoint, InputEvent, LoadStatus, MouseButton,
-    MouseButtonAction, MouseButtonEvent, MouseMoveEvent, Preferences, RenderingContext, Servo,
-    ServoBuilder, SoftwareRenderingContext, WebView, WebViewDelegate, WebViewPoint,
+    MouseButtonAction, MouseButtonEvent, MouseMoveEvent, Preferences, Servo,
+    ServoBuilder, SoftwareRenderingContext, WebViewDelegate, WebViewPoint,
     WheelDelta, WheelEvent, WheelMode,
 };
 use std::cell::RefCell;
@@ -57,55 +62,6 @@ pub enum WebViewMessage {
     MouseMoved(f32, f32),
     /// Mouse wheel scrolled over webview
     Scrolled(f64, f64),
-}
-
-/// State required to manage a Servo webview instance.
-pub struct WebViewState {
-    servo: Rc<Servo>,
-    rendering_context: Rc<dyn RenderingContext>,
-    webview: WebView,
-    frame_handle: Option<Handle>,
-    servo_event_receiver: iced::futures::channel::mpsc::UnboundedReceiver<ServoEvent>,
-    mouse_position: (f32, f32),
-    /// Last known widget size from layout; used to detect resizes.
-    last_widget_size: Option<Size<u32>>,
-    /// Whether the frame needs to be recaptured on the next tick.
-    frame_dirty: bool,
-}
-
-impl WebViewState {
-    /// Paint the webview and capture the current frame as an image handle.
-    fn capture_frame(&mut self) {
-        self.webview.paint();
-        self.rendering_context.present();
-        let size = self.rendering_context.size();
-        let rect = DeviceIntRect::new(
-            DeviceIntPoint::origin(),
-            DeviceIntPoint::new(size.width as i32, size.height as i32),
-        );
-        if let Some(img) = self.rendering_context.read_to_image(rect) {
-            self.frame_handle = Some(Handle::from_rgba(size.width, size.height, img.as_raw().clone()));
-        }
-        // Frame has been captured; clear the dirty flag.
-        self.frame_dirty = false;
-    }
-
-    /// Mark the frame as needing recapture on the next tick.
-    fn mark_frame_dirty(&mut self) {
-        self.frame_dirty = true;
-    }
-
-    /// Send an input event to the webview and spin the event loop.
-    fn send_input_event(&mut self, event: InputEvent) {
-        self.webview.notify_input_event(event);
-        self.servo.spin_event_loop();
-    }
-
-    /// Get the current mouse position as a WebViewPoint.
-    fn device_point(&self) -> WebViewPoint {
-        let (x, y) = self.mouse_position;
-        WebViewPoint::Device(DevicePoint::new(x, y))
-    }
 }
 
 /// Map an iced mouse button to a Servo MouseButton.
@@ -192,17 +148,17 @@ impl Default for State {
     }
 }
 
-/// A widget that displays a Servo webview.
-pub struct WebViewWidget<'a, Message> {
-    state: Rc<RefCell<WebViewState>>,
+/// A widget that displays a Servo webview for the current tab.
+pub(crate) struct WebViewWidget<'a, Message> {
+    window: &'a WindowState,
     _phantom: std::marker::PhantomData<&'a Message>,
 }
 
 impl<'a, Message> WebViewWidget<'a, Message> {
-    /// Creates a new webview widget from shared state.
-    pub fn new(state: Rc<RefCell<WebViewState>>) -> Self {
+    /// Creates a new webview widget from a window reference.
+    pub(crate) fn new(window: &'a WindowState) -> Self {
         Self {
-            state,
+            window,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -236,19 +192,6 @@ where
         limits: &layout::Limits,
     ) -> layout::Node {
         let size = limits.width(Length::Fill).height(Length::Fill).max();
-        // Check if the widget size changed and resize the rendering context
-        let widget_size = Size {
-            width: size.width as u32,
-            height: size.height as u32,
-        };
-        let mut state = self.state.borrow_mut();
-        if let Some(last) = state.last_widget_size {
-            if last != widget_size {
-                resize_if_needed(&mut state, widget_size);
-            }
-        }
-        state.last_widget_size = Some(widget_size);
-        drop(state);
         layout::Node::new(size)
     }
 
@@ -274,14 +217,6 @@ where
         {
             widget_state.is_hovered = cursor.is_over(bounds);
             widget_state.bounds = bounds;
-
-            // Update mouse position if hovering
-            if widget_state.is_hovered {
-                if let Some(pos) = cursor.position_in(bounds) {
-                    self.state.borrow_mut().mouse_position = (pos.x, pos.y);
-                    shell.publish(Message::from(WebViewMessage::MouseMoved(pos.x, pos.y)));
-                }
-            }
         }
 
         // Ignore events outside the widget bounds
@@ -353,19 +288,21 @@ where
     ) {
         let bounds = layout.bounds();
 
-        if let Some(handle) = &self.state.borrow().frame_handle {
-            renderer.draw_image(
-                image::Image {
-                    handle: handle.clone(),
-                    border_radius: [0.0; 4].into(),
-                    filter_method: image::FilterMethod::Nearest,
-                    rotation: Radians(0.0),
-                    opacity: 1.0,
-                    snap: true,
-                },
-                bounds,
-                bounds,
-            );
+        if let Some(webview_state) = self.window.current_webview() {
+            if let Some(handle) = &webview_state.borrow().frame_handle {
+                renderer.draw_image(
+                    image::Image {
+                        handle: handle.clone(),
+                        border_radius: [0.0; 4].into(),
+                        filter_method: image::FilterMethod::Nearest,
+                        rotation: Radians(0.0),
+                        opacity: 1.0,
+                        snap: true,
+                    },
+                    bounds,
+                    bounds,
+                );
+            }
         }
     }
 }
@@ -421,10 +358,14 @@ impl Builder {
         self
     }
 
-    /// Build a new Servo engine and webview state.
-    /// Returns the shared `Rc<Servo>` and the `WebViewState`.
-    /// Use this for the first tab in a window.
-    pub fn build(self) -> (Rc<Servo>, WebViewState) {
+    /// Build a new Servo engine and webview components.
+    /// Returns the components for WindowState.
+    pub fn build(self) -> (
+        Rc<Servo>,
+        Rc<dyn RenderingContext>,
+        WebView,
+        iced::futures::channel::mpsc::UnboundedReceiver<ServoEvent>,
+    ) {
         let mut preferences = Preferences::default();
         if self.transparent_background {
             preferences.shell_background_color_rgba = [0.0, 0.0, 0.0, 0.0];
@@ -434,13 +375,29 @@ impl Builder {
         servo.setup_logging();
 
         let servo_rc = Rc::new(servo);
-        let state = self.build_with_servo(Rc::clone(&servo_rc));
-        (servo_rc, state)
+        let (rendering_context, webview, receiver) = self.build_components(Rc::clone(&servo_rc));
+        (servo_rc, rendering_context, webview, receiver)
     }
 
-    /// Build a webview state using an existing shared Servo engine.
-    /// Use this for additional tabs that share the same Servo instance.
-    pub fn build_with_servo(self, servo: Rc<Servo>) -> WebViewState {
+    /// Build webview components using an existing shared Servo engine.
+    pub fn build_with_servo(self, servo: Rc<Servo>) -> (
+        Rc<Servo>,
+        Rc<dyn RenderingContext>,
+        WebView,
+        iced::futures::channel::mpsc::UnboundedReceiver<ServoEvent>,
+    ) {
+        let (rendering_context, webview, receiver) = self.build_components(Rc::clone(&servo));
+        (servo, rendering_context, webview, receiver)
+    }
+
+    fn build_components(
+        self,
+        servo: Rc<Servo>,
+    ) -> (
+        Rc<dyn RenderingContext>,
+        WebView,
+        iced::futures::channel::mpsc::UnboundedReceiver<ServoEvent>,
+    ) {
         let initial_size = PhysicalSize {
             width: self.width,
             height: self.height,
@@ -468,20 +425,7 @@ impl Builder {
 
         servo.spin_event_loop();
 
-        let mut state = WebViewState {
-            servo,
-            rendering_context: rendering_context_rc,
-            webview,
-            frame_handle: None,
-            servo_event_receiver,
-            mouse_position: (0.0, 0.0),
-            last_widget_size: None,
-            frame_dirty: false,
-        };
-
-        // Paint and capture the initial frame
-        state.capture_frame();
-        state
+        (rendering_context_rc, webview, servo_event_receiver)
     }
 }
 
@@ -490,62 +434,105 @@ pub fn subscription() -> Subscription<WebViewMessage> {
     every(Duration::from_millis(16)).map(|_| WebViewMessage::Tick)
 }
 
-/// Process a WebViewMessage and update the webview state.
+/// Process a WebViewMessage and update the current tab's webview state.
 /// Returns a vector of ServoEvent messages that the application should handle.
-pub fn update(
-    state: &mut WebViewState,
-    message: WebViewMessage,
-) -> Vec<ServoEvent> {
-    let mut events = Vec::new();
+pub fn update(win: &mut WindowState, message: WebViewMessage) -> Vec<ServoEvent> {
+    let webview_state = match win.current_webview() {
+        Some(state) => state,
+        None => return Vec::new(),
+    };
 
     match message {
         WebViewMessage::Tick => {
+            // Clone servo Rc before mutable borrow
+            let servo = {
+                let state_ref = webview_state.borrow();
+                Rc::clone(&state_ref.servo)
+            };
+
             // Spin Servo's event loop
-            state.servo.spin_event_loop();
+            servo.spin_event_loop();
 
             // Process any pending Servo events from the channel
+            let mut events = Vec::new();
             let mut needs_repaint = false;
-            while let Ok(event) = state.servo_event_receiver.try_recv() {
-                // FrameReady events indicate the content has changed and needs repainting
-                if matches!(event, ServoEvent::FrameReady) {
-                    needs_repaint = true;
+            {
+                let mut state = webview_state.borrow_mut();
+                let servo_event_receiver = &mut state.servo_event_receiver;
+                while let Ok(event) = servo_event_receiver.try_recv() {
+                    if matches!(event, ServoEvent::FrameReady) {
+                        needs_repaint = true;
+                    }
+                    events.push(event);
                 }
-                events.push(event);
+
+                // Only paint and capture the frame when content actually changed
+                if needs_repaint || state.frame_dirty {
+                    state.webview.paint();
+                    state.rendering_context.present();
+                    let size = state.rendering_context.size();
+                    let rect = DeviceIntRect::new(
+                        DeviceIntPoint::origin(),
+                        DeviceIntPoint::new(size.width as i32, size.height as i32),
+                    );
+                    if let Some(img) = state.rendering_context.read_to_image(rect) {
+                        state.frame_handle = Some(Handle::from_rgba(size.width, size.height, img.as_raw().clone()));
+                    }
+                    state.frame_dirty = false;
+                }
             }
 
-            // Only paint and capture the frame when content actually changed
-            if needs_repaint || state.frame_dirty {
-                state.capture_frame();
-            }
+            events
         }
         WebViewMessage::MousePressed(button) => {
-            let point = state.device_point();
+            let servo = {
+                let state_ref = webview_state.borrow();
+                Rc::clone(&state_ref.servo)
+            };
+            let mut state = webview_state.borrow_mut();
+            let point = WebViewPoint::Device(DevicePoint::new(state.mouse_position.0, state.mouse_position.1));
             let event = InputEvent::MouseButton(MouseButtonEvent::new(
                 MouseButtonAction::Down,
                 button,
                 point,
             ));
-            state.send_input_event(event);
-            state.mark_frame_dirty();
+            state.webview.notify_input_event(event);
+            servo.spin_event_loop();
+            state.frame_dirty = true;
+            Vec::new()
         }
         WebViewMessage::MouseReleased(button) => {
-            let point = state.device_point();
+            let servo = {
+                let state_ref = webview_state.borrow();
+                Rc::clone(&state_ref.servo)
+            };
+            let mut state = webview_state.borrow_mut();
+            let point = WebViewPoint::Device(DevicePoint::new(state.mouse_position.0, state.mouse_position.1));
             let event = InputEvent::MouseButton(MouseButtonEvent::new(
                 MouseButtonAction::Up,
                 button,
                 point,
             ));
-            state.send_input_event(event);
-            state.mark_frame_dirty();
+            state.webview.notify_input_event(event);
+            servo.spin_event_loop();
+            state.frame_dirty = true;
+            Vec::new()
         }
         WebViewMessage::MouseMoved(x, y) => {
+            let mut state = webview_state.borrow_mut();
             state.mouse_position = (x, y);
-            let point = state.device_point();
+            let point = WebViewPoint::Device(DevicePoint::new(x, y));
             let event = InputEvent::MouseMove(MouseMoveEvent::new(point));
             state.webview.notify_input_event(event);
+            Vec::new()
         }
         WebViewMessage::Scrolled(dx, dy) => {
-            let point = state.device_point();
+            let servo = {
+                let state_ref = webview_state.borrow();
+                Rc::clone(&state_ref.servo)
+            };
+            let mut state = webview_state.borrow_mut();
+            let point = WebViewPoint::Device(DevicePoint::new(state.mouse_position.0, state.mouse_position.1));
             let event = InputEvent::Wheel(WheelEvent::new(
                 WheelDelta {
                     x: dx,
@@ -555,85 +542,218 @@ pub fn update(
                 },
                 point,
             ));
-            state.send_input_event(event);
-            state.mark_frame_dirty();
+            state.webview.notify_input_event(event);
+            servo.spin_event_loop();
+            state.frame_dirty = true;
+            Vec::new()
         }
     }
-
-    events
 }
 
 /// Navigate to a URL.
-pub fn load_url(state: &mut WebViewState, url: &str) {
+pub fn load_url(webview: &mut WebView, servo: &Servo, url: &str) {
     let url_str = if url.starts_with("http://") || url.starts_with("https://") {
         url.to_string()
     } else {
         format!("https://{}", url)
     };
     if let Ok(u) = Url::parse(&url_str) {
-        state.webview.load(u);
+        webview.load(u);
     }
-    state.servo.spin_event_loop();
+    servo.spin_event_loop();
 }
 
 /// Navigate back in history.
-pub fn go_back(state: &mut WebViewState, steps: usize) {
-    state.webview.go_back(steps);
-    state.servo.spin_event_loop();
+pub fn go_back(webview: &mut WebView, servo: &Servo, steps: usize) {
+    webview.go_back(steps);
+    servo.spin_event_loop();
 }
 
 /// Navigate forward in history.
-pub fn go_forward(state: &mut WebViewState, steps: usize) {
-    state.webview.go_forward(steps);
-    state.servo.spin_event_loop();
+pub fn go_forward(webview: &mut WebView, servo: &Servo, steps: usize) {
+    webview.go_forward(steps);
+    servo.spin_event_loop();
 }
 
 /// Check if back navigation is available.
-pub fn can_go_back(state: &WebViewState) -> bool {
-    state.webview.can_go_back()
+pub fn can_go_back(webview: &WebView) -> bool {
+    webview.can_go_back()
 }
 
 /// Check if forward navigation is available.
-pub fn can_go_forward(state: &WebViewState) -> bool {
-    state.webview.can_go_forward()
+pub fn can_go_forward(webview: &WebView) -> bool {
+    webview.can_go_forward()
 }
 
 /// Get the current URL of the webview.
-pub fn current_url(state: &WebViewState) -> String {
-    state.webview.url().map(|u| u.to_string()).unwrap_or_default()
+pub fn current_url(webview: &WebView) -> String {
+    webview.url().map(|u| u.to_string()).unwrap_or_default()
 }
 
-/// Resize the rendering context to match the widget's current size.
-/// Returns `true` if the size changed and a repaint is needed.
-fn resize_if_needed(state: &mut WebViewState, widget_size: Size<u32>) -> bool {
-    let current_size = state.rendering_context.size();
-    let current = Size {
-        width: current_size.width,
-        height: current_size.height,
-    };
+/// Per-tab webview state.
+pub struct WebViewState {
+    /// Shared Servo engine
+    pub servo: Rc<Servo>,
+    /// Rendering context for the webview
+    pub rendering_context: Rc<dyn RenderingContext>,
+    /// The Servo WebView instance
+    pub webview: WebView,
+    /// Captured frame image for display
+    pub frame_handle: Option<Handle>,
+    /// Channel receiver for Servo events
+    pub servo_event_receiver: iced::futures::channel::mpsc::UnboundedReceiver<ServoEvent>,
+    /// Current mouse position over the webview
+    pub mouse_position: (f32, f32),
+    /// Whether the frame needs to be recaptured on the next tick.
+    pub frame_dirty: bool,
+}
 
-    if current == widget_size {
-        return false;
+/// State for a single window, containing tabs and per-tab webviews.
+pub struct WindowState {
+    /// Shared Servo engine (used to create new tabs)
+    pub servo: Rc<Servo>,
+    /// Per-tab webview states
+    pub tab_webview: segmented_button::SecondaryMap<Rc<RefCell<WebViewState>>>,
+    /// Current URL displayed in the address bar (active tab only)
+    pub url: String,
+    /// Tab bar model for managing tabs
+    pub tab_model: segmented_button::SingleSelectModel,
+    /// The entity key for the current tab
+    pub tab_id: segmented_button::Entity,
+    /// Load status of the active tab (for progress bar)
+    pub load_status: LoadStatus,
+    /// Status text of the active tab (for status bar)
+    pub status_text: Option<String>,
+}
+
+impl WindowState {
+    /// Create a new window state with an initial URL.
+    pub fn new(initial_url: &str) -> Self {
+        let mut tab_model = segmented_button::SingleSelectModel::default();
+
+        let tab_id = tab_model.insert().text("New Tab").id();
+        tab_model.activate(tab_id);
+
+        // Create the Servo engine and webview
+        let (
+            servo,
+            rendering_context,
+            webview,
+            servo_event_receiver,
+        ) = Builder::default()
+            .initial_url(initial_url)
+            .transparent_background(true)
+            .size(800, 600)
+            .build();
+
+        let mut tab_webview = segmented_button::SecondaryMap::new();
+        tab_webview.insert(
+            tab_id,
+            Rc::new(RefCell::new(WebViewState {
+                servo: Rc::clone(&servo),
+                rendering_context,
+                webview,
+                frame_handle: None,
+                servo_event_receiver,
+                mouse_position: (0.0, 0.0),
+                frame_dirty: false,
+            })),
+        );
+
+        Self {
+            servo,
+            tab_webview,
+            url: initial_url.to_string(),
+            tab_model,
+            tab_id,
+            load_status: LoadStatus::Complete,
+            status_text: None,
+        }
     }
 
-    // Recreate the rendering context at the new size
-    let new_size = PhysicalSize {
-        width: widget_size.width,
-        height: widget_size.height,
-    };
-    match SoftwareRenderingContext::new(new_size) {
-        Ok(new_context) => {
-            // Replace the Rc with a new one
-            state.rendering_context = Rc::new(new_context);
+    /// Get the current tab's webview state.
+    pub fn current_webview(&self) -> Option<Rc<RefCell<WebViewState>>> {
+        self.tab_webview.get(self.tab_id).cloned()
+    }
 
-            // Clear the frame handle as it's stale and mark for repaint
-            state.frame_handle = None;
-            state.mark_frame_dirty();
-            true
+    /// Create a new tab with its own webview.
+    pub fn create_new_tab(&mut self) -> segmented_button::Entity {
+        let new_tab_id = self.tab_model.insert().text("New Tab").id();
+        self.tab_model.activate(new_tab_id);
+
+        // Create a new webview sharing the Servo engine
+        let (
+            _servo,
+            rendering_context,
+            webview,
+            servo_event_receiver,
+        ) = Builder::default()
+            .transparent_background(true)
+            .size(800, 600)
+            .build_with_servo(Rc::clone(&self.servo));
+
+        // Capture URL before moving webview
+        let url = current_url(&webview);
+
+        self.tab_webview.insert(
+            new_tab_id,
+            Rc::new(RefCell::new(WebViewState {
+                servo: Rc::clone(&self.servo),
+                rendering_context,
+                webview,
+                frame_handle: None,
+                servo_event_receiver,
+                mouse_position: (0.0, 0.0),
+                frame_dirty: false,
+            })),
+        );
+
+        // Reset state for the new tab
+        self.url = url;
+        self.load_status = LoadStatus::Complete;
+        self.status_text = None;
+        self.tab_id = new_tab_id;
+
+        new_tab_id
+    }
+
+    /// Remove a tab from the model.
+    #[allow(dead_code)]
+    pub fn remove_tab(&mut self, tab_id: segmented_button::Entity) {
+        self.tab_webview.remove(tab_id);
+        self.tab_model.remove(tab_id);
+
+        // If the removed tab was active, activate another tab
+        if self.tab_id == tab_id {
+            let iter = self.tab_model.iter().collect::<Vec<_>>();
+            if let Some(new_tab) = iter.into_iter().next() {
+                self.tab_id = new_tab;
+                self.tab_model.activate(new_tab);
+                // Sync URL from the new active tab's webview
+                if let Some(webview_state) = self.current_webview() {
+                    self.url = current_url(&webview_state.borrow().webview);
+                }
+            }
         }
-        Err(e) => {
-            eprintln!("Failed to resize rendering context: {:?}", e);
-            false
+    }
+
+    /// Extract a tab's webview for popout to a new window.
+    pub fn extract_tab(&mut self, tab_id: segmented_button::Entity) -> Option<Rc<RefCell<WebViewState>>> {
+        let webview_state = self.tab_webview.remove(tab_id);
+        self.tab_model.remove(tab_id);
+
+        // If the removed tab was active, activate another tab
+        if self.tab_id == tab_id {
+            let iter = self.tab_model.iter().collect::<Vec<_>>();
+            if let Some(new_tab) = iter.into_iter().next() {
+                self.tab_id = new_tab;
+                self.tab_model.activate(new_tab);
+                if let Some(remaining_webview) = self.current_webview() {
+                    self.url = current_url(&remaining_webview.borrow().webview);
+                }
+            }
         }
+
+        webview_state
     }
 }
