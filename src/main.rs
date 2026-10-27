@@ -25,70 +25,23 @@ use cosmic::{executor, iced, widget};
 use menu::MenuActionKind;
 use message::Message;
 use servo::LoadStatus;
-use url::Url;
 use webview::{ServoEvent, WebViewMessage};
 
-/// Manages browser navigation history.
-#[derive(Clone, Default)]
-struct History {
-    entries: Vec<Url>,
-    current: usize,
-}
-
-impl History {
-    fn can_go_back(&self) -> bool {
-        self.current > 0
-    }
-
-    fn can_go_forward(&self) -> bool {
-        self.current < self.entries.len().saturating_sub(1)
-    }
-}
-
-/// Groups browser state fields updated by Servo events.
-#[derive(Clone)]
-struct BrowserState {
-    url: String,
-    title: Option<String>,
-    load_status: LoadStatus,
-    status_text: Option<String>,
-}
-
-/// Per-tab state containing browser state and history.
-#[derive(Clone)]
-struct TabState {
-    browser: BrowserState,
-    history: History,
-}
-
-impl TabState {
-    fn new(url: impl Into<String>) -> Self {
-        Self {
-            browser: BrowserState {
-                url: url.into(),
-                title: None,
-                load_status: LoadStatus::Complete,
-                status_text: None,
-            },
-            history: History::default(),
-        }
-    }
-
-    fn new_tab() -> Self {
-        Self::new("")
-    }
-}
 
 /// State for a single window, containing tabs and their webviews
 struct WindowState {
     /// Shared Servo engine for all tabs in this window
     servo: Rc<servo::Servo>,
+    /// Current URL displayed in the address bar (active tab only)
+    url: String,
     /// Tab bar model for managing tabs
     tab_model: segmented_button::SingleSelectModel,
     /// The entity key for the current tab
     tab_id: segmented_button::Entity,
-    /// Per-tab state storage (browser state + history)
-    tab_state: SecondaryMap<TabState>,
+    /// Load status of the active tab (for progress bar)
+    load_status: LoadStatus,
+    /// Status text of the active tab (for status bar)
+    status_text: Option<String>,
     /// Per-tab webview state storage
     tab_webview: SecondaryMap<Rc<RefCell<webview::WebViewState>>>,
 }
@@ -96,12 +49,10 @@ struct WindowState {
 impl WindowState {
     fn new(initial_url: &str) -> Self {
         let mut tab_model = segmented_button::SingleSelectModel::default();
-        let mut tab_state = SecondaryMap::new();
         let mut tab_webview = SecondaryMap::new();
         
         let tab_id = tab_model.insert().text("New Tab").id();
         tab_model.activate(tab_id);
-        tab_state.insert(tab_id, TabState::new(initial_url));
         
         // Create the first webview, which initializes the Servo engine
         let (servo, webview_state) = webview::Builder::default()
@@ -113,9 +64,11 @@ impl WindowState {
         
         Self {
             servo,
+            url: initial_url.to_string(),
             tab_model,
             tab_id,
-            tab_state,
+            load_status: LoadStatus::Complete,
+            status_text: None,
             tab_webview,
         }
     }
@@ -123,7 +76,6 @@ impl WindowState {
     fn create_new_tab(&mut self) -> segmented_button::Entity {
         let new_tab_id = self.tab_model.insert().text("New Tab").id();
         self.tab_model.activate(new_tab_id);
-        self.tab_state.insert(new_tab_id, TabState::new_tab());
         
         // Create per-tab webview sharing the same Servo engine
         let webview_state = webview::Builder::default()
@@ -132,6 +84,11 @@ impl WindowState {
             .build_with_servo(Rc::clone(&self.servo));
         self.tab_webview.insert(new_tab_id, Rc::new(RefCell::new(webview_state)));
         
+        // Reset state for the new tab
+        self.url.clear();
+        self.load_status = LoadStatus::Complete;
+        self.status_text = None;
+        
         new_tab_id
     }
     
@@ -139,9 +96,8 @@ impl WindowState {
         self.tab_webview.get(self.tab_id).cloned()
     }
     
-    /// Extract a tab's state and webview for popout to a new window
-    fn extract_tab(&mut self, tab_id: segmented_button::Entity) -> Option<(TabState, Rc<RefCell<webview::WebViewState>>)> {
-        let tab_state = self.tab_state.remove(tab_id)?;
+    /// Extract a tab's webview for popout to a new window
+    fn extract_tab(&mut self, tab_id: segmented_button::Entity) -> Option<Rc<RefCell<webview::WebViewState>>> {
         let webview_state = self.tab_webview.remove(tab_id)?;
         self.tab_model.remove(tab_id);
         
@@ -154,7 +110,7 @@ impl WindowState {
             }
         }
         
-        Some((tab_state, webview_state))
+        Some(webview_state)
     }
 }
 
@@ -217,30 +173,26 @@ impl cosmic::Application for App {
     fn update(&mut self, message: Message) -> app::Task<Message> {
         match message {
             Message::UrlChanged(u) => {
+                // Only update the display URL; navigation is triggered by Go (Enter or button press)
                 if let Some(win) = self.get_focused_window() {
-                    if let Some(tab) = win.tab_state.get_mut(win.tab_id) {
-                        tab.browser.url = u;
-                    }
+                    win.url = u;
                 }
                 app::Task::none()
             }
             Message::Go => {
+                // Navigate to the URL currently in the address bar
                 if let Some(win) = self.get_focused_window() {
-                    if let Some(tab) = win.tab_state.get(win.tab_id) {
-                        if let Some(webview) = win.get_current_webview() {
-                            webview::load_url(&mut webview.borrow_mut(), &tab.browser.url);
-                        }
+                    if let Some(webview) = win.get_current_webview() {
+                        webview::load_url(&mut webview.borrow_mut(), &win.url);
                     }
                 }
                 app::Task::none()
             }
             Message::Back => {
                 if let Some(win) = self.get_focused_window() {
-                    if let Some(tab) = win.tab_state.get(win.tab_id) {
-                        if tab.history.can_go_back() {
-                            if let Some(webview) = win.get_current_webview() {
-                                webview::go_back(&mut webview.borrow_mut(), 1);
-                            }
+                    if let Some(webview) = win.get_current_webview() {
+                        if webview::can_go_back(&webview.borrow()) {
+                            webview::go_back(&mut webview.borrow_mut(), 1);
                         }
                     }
                 }
@@ -248,11 +200,9 @@ impl cosmic::Application for App {
             }
             Message::Forward => {
                 if let Some(win) = self.get_focused_window() {
-                    if let Some(tab) = win.tab_state.get(win.tab_id) {
-                        if tab.history.can_go_forward() {
-                            if let Some(webview) = win.get_current_webview() {
-                                webview::go_forward(&mut webview.borrow_mut(), 1);
-                            }
+                    if let Some(webview) = win.get_current_webview() {
+                        if webview::can_go_forward(&webview.borrow()) {
+                            webview::go_forward(&mut webview.borrow_mut(), 1);
                         }
                     }
                 }
@@ -269,6 +219,11 @@ impl cosmic::Application for App {
                 if let Some(win) = self.get_focused_window() {
                     win.tab_id = tab_id;
                     win.tab_model.activate(tab_id);
+                    // Sync the URL from the activated tab's webview
+                    if let Some(webview) = win.get_current_webview() {
+                        let ws = webview.borrow();
+                        win.url = webview::current_url(&ws);
+                    }
                 }
                 app::Task::none()
             }
@@ -290,36 +245,30 @@ impl cosmic::Application for App {
                         let events = webview::update(&mut webview_state.borrow_mut(), WebViewMessage::Tick);
                         for evt in events {
                             match evt {
-                                ServoEvent::UrlChanged(url) => {
-                                    if let Some(tab) = win.tab_state.get_mut(tab_id) {
-                                        tab.browser.url = url.to_string();
-                                    }
-                                }
                                 ServoEvent::TitleChanged(title) => {
-                                    if let Some(tab) = win.tab_state.get_mut(tab_id) {
-                                        tab.browser.title = title.clone();
-                                    }
                                     let tab_title = title.unwrap_or_else(|| "New Tab".to_string());
                                     win.tab_model.text_set(tab_id, tab_title);
                                 }
                                 ServoEvent::LoadStatusChanged(status) => {
-                                    if let Some(tab) = win.tab_state.get_mut(tab_id) {
-                                        tab.browser.load_status = status;
+                                    // Only update if this is the current tab
+                                    if tab_id == win.tab_id {
+                                        win.load_status = status;
                                     }
                                 }
                                 ServoEvent::StatusTextChanged(status) => {
-                                    if let Some(tab) = win.tab_state.get_mut(tab_id) {
-                                        tab.browser.status_text = status;
-                                    }
-                                }
-                                ServoEvent::HistoryChanged(entries, current) => {
-                                    if let Some(tab) = win.tab_state.get_mut(tab_id) {
-                                        tab.history.entries = entries;
-                                        tab.history.current = current;
+                                    // Only update if this is the current tab
+                                    if tab_id == win.tab_id {
+                                        win.status_text = status;
                                     }
                                 }
                                 ServoEvent::Crashed(reason, _backtrace) => {
                                     eprintln!("Servo crashed: {}", reason);
+                                }
+                                ServoEvent::UrlChanged(url) => {
+                                    // Only update the window's URL if this is the current tab
+                                    if tab_id == win.tab_id {
+                                        win.url = url.to_string();
+                                    }
                                 }
                                 ServoEvent::CursorChanged(_) | ServoEvent::FrameReady | ServoEvent::FullscreenChanged(_) => {}
                             }
@@ -358,22 +307,28 @@ impl cosmic::Application for App {
             Message::TabPoppedOut(tab_id) => {
                 // Extract the tab from the focused window and create a new window
                 if let Some(source_win) = self.get_focused_window() {
-                    if let Some((tab_state, webview_state)) = source_win.extract_tab(tab_id) {
+                    if let Some(webview_state) = source_win.extract_tab(tab_id) {
                         // Share the Servo engine from the source window
                         let servo = Rc::clone(&source_win.servo);
-                        // Create window state with the extracted tab
+                        // Query the URL from the extracted tab's webview
+                        let url = {
+                            let ws = webview_state.borrow();
+                            webview::current_url(&ws)
+                        };
                         let mut new_win = WindowState {
                             servo,
+                            url,
                             tab_model: segmented_button::SingleSelectModel::default(),
                             tab_id,
-                            tab_state: SecondaryMap::new(),
+                            load_status: LoadStatus::Complete,
+                            status_text: None,
                             tab_webview: SecondaryMap::new(),
                         };
-                        let _ = new_win.tab_model.insert().text(
-                            tab_state.browser.title.clone().unwrap_or_else(|| "New Tab".to_string())
-                        ).id();
+                        let tab_title = source_win.tab_model.text(tab_id)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "New Tab".to_string());
+                        let _ = new_win.tab_model.insert().text(tab_title).id();
                         new_win.tab_model.activate(tab_id);
-                        new_win.tab_state.insert(tab_id, tab_state);
                         new_win.tab_webview.insert(tab_id, webview_state);
 
                         // window::open returns (temporary_id, Task<real_id>)
@@ -406,9 +361,6 @@ impl cosmic::Application for App {
             Message::AboutUrlPressed(url) => {
                 // Navigate the focused tab to the clicked URL
                 if let Some(win) = self.get_focused_window() {
-                    if let Some(tab) = win.tab_state.get_mut(win.tab_id) {
-                        tab.browser.url = url.clone();
-                    }
                     if let Some(webview) = win.get_current_webview() {
                         webview::load_url(&mut webview.borrow_mut(), &url);
                     }
@@ -454,8 +406,16 @@ impl cosmic::Application for App {
         ]);
         let menu_bar_element: Element<'_, Message> = menu_bar_widget.into();
 
-        // Get current tab's state
-        let current_tab = win.tab_state.get(win.tab_id).expect("current tab exists");
+        // Query webview for navigation state
+        let (can_back, can_forward) = if let Some(webview_state) = win.get_current_webview() {
+            let ws = webview_state.borrow();
+            (webview::can_go_back(&ws), webview::can_go_forward(&ws))
+        } else {
+            (false, false)
+        };
+
+        // URL bar uses the window's URL field (active tab only)
+        let url = &win.url;
 
         // Tab bar with page title in the tab header
         // Enables tab drag-and-drop for reordering and pulling tabs out
@@ -468,29 +428,27 @@ impl cosmic::Application for App {
 
         // Navigation buttons
         let back_button = widget::button::text("←")
-            .on_press_maybe(current_tab.history.can_go_back().then_some(Message::Back))
+            .on_press_maybe(can_back.then_some(Message::Back))
             .padding(4);
         let forward_button = widget::button::text("→")
-            .on_press_maybe(current_tab.history.can_go_forward().then_some(Message::Forward))
+            .on_press_maybe(can_forward.then_some(Message::Forward))
             .padding(4);
 
         // URL bar with adaptive placeholder
-        let placeholder = if current_tab.browser.url.starts_with("http://") {
+        let placeholder = if url.starts_with("http://") {
             "http://"
         } else {
             "https://"
         };
-        let url_input = text_input(placeholder, &current_tab.browser.url)
+        let url_input = text_input(placeholder, url)
             .on_input(Message::UrlChanged)
             .on_submit(|_| Message::Go);
-        let go_button = widget::button::text("Go").on_press(Message::Go);
-
-        let url_bar = row![back_button, forward_button, url_input, go_button,]
+        let url_bar = row![back_button, forward_button, url_input, widget::button::text("Go").on_press(Message::Go),]
             .padding(8)
             .spacing(8);
 
         // Progress bar - hidden when loading is complete
-        let progress: Element<'_, Message> = match &current_tab.browser.load_status {
+        let progress: Element<'_, Message> = match &win.load_status {
             LoadStatus::Started | LoadStatus::HeadParsed => {
                 let pb = progress_bar(0.0..=1.0, 0.5);
                 widget::container(pb)
@@ -526,7 +484,7 @@ impl cosmic::Application for App {
         };
 
         // Status bar
-        let status_text = current_tab.browser.status_text.as_deref().unwrap_or("");
+        let status_text = win.status_text.as_deref().unwrap_or("");
         let status_bar = widget::container(text(status_text))
             .padding(4);
 

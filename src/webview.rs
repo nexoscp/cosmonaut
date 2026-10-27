@@ -39,7 +39,6 @@ pub enum ServoEvent {
     LoadStatusChanged(LoadStatus),
     StatusTextChanged(Option<String>),
     CursorChanged(Cursor),
-    HistoryChanged(Vec<Url>, usize),
     FrameReady,
     Crashed(String, Option<String>),
     FullscreenChanged(bool),
@@ -158,10 +157,10 @@ impl WebViewDelegate for ServoDelegate {
     fn notify_history_changed(
         &self,
         _webview: WebView,
-        entries: Vec<Url>,
-        current: usize,
+        _entries: Vec<Url>,
+        _current: usize,
     ) {
-        self.send(ServoEvent::HistoryChanged(entries, current));
+        // History is managed by Servo; Cosmonaut queries it directly when needed.
     }
 
     fn notify_crashed(
@@ -587,6 +586,21 @@ pub fn go_back(state: &mut WebViewState, steps: usize) {
 pub fn go_forward(state: &mut WebViewState, steps: usize) {
     state.webview.go_forward(steps);
     state.servo.spin_event_loop();
+}
+
+/// Check if back navigation is available.
+pub fn can_go_back(state: &WebViewState) -> bool {
+    state.webview.can_go_back()
+}
+
+/// Check if forward navigation is available.
+pub fn can_go_forward(state: &WebViewState) -> bool {
+    state.webview.can_go_forward()
+}
+
+/// Get the current URL of the webview.
+pub fn current_url(state: &WebViewState) -> String {
+    state.webview.url().map(|u| u.to_string()).unwrap_or_default()
 }
 
 /// Resize the rendering context to match the widget's current size.
