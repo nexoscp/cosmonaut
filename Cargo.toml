@@ -27,6 +27,7 @@ default-features = false
 features = ["about", "multi-window", "tokio", "wayland", "surface-message", "wgpu", "xdg-portal"]
 
 [build-dependencies]
+cargo_toml = "1.0.1"
 
 [profile.release]
 lto = true
