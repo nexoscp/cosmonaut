@@ -16,13 +16,13 @@ url = "2.5.8"
 
 [dependencies.servo]
 git = "https://github.com/servo/servo.git"
-rev = "8cd4f60da15ccbc30d5f1b9935d17bb0a5c0ce40"
+rev = "c89caea7ef5e2d28e45ac1784c77a44e75ce58d4"
 default-features = false
 features = ["baked-in-resources", "bundled_freetype", "clipboard", "js_jit"]
 
 [dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic.git"
-rev = "430f3d48a97d8779f9c1985473912e594ccca1ae"
+rev = "dd108aa99d7306110eef06da43eafc109e1ab151"
 default-features = false
 features = ["about", "multi-window", "tokio", "wayland", "surface-message", "wgpu", "xdg-portal"]
 

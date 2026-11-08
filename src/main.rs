@@ -273,6 +273,12 @@ impl cosmic::Application for App {
                     .height(4)
                     .into()
             }
+            LoadStatus::Stopped => {
+                widget::container(text("stopped"))
+                    .width(Length::Fill)
+                    .height(4)
+                    .into()
+            }
         };
 
         // Webview content

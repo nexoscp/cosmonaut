@@ -535,15 +535,12 @@ pub fn update(tabs: &TabManager, message: WebViewMessage) -> Vec<ServoEvent> {
             };
             let mut state = webview_state.borrow_mut();
             let point = WebViewPoint::Device(DevicePoint::new(state.mouse_position.0, state.mouse_position.1));
-            let event = InputEvent::Wheel(WheelEvent::new(
-                WheelDelta {
-                    x: dx,
-                    y: dy,
-                    z: 0.0,
-                    mode: WheelMode::DeltaPixel,
-                },
-                point,
-            ));
+            let event = InputEvent::Wheel(WheelEvent::new(WheelDelta {
+                x: dx,
+                y: dy,
+                z: 0.0,
+                mode: WheelMode::DeltaPixel,
+            }, point, Default::default()), );
             state.webview.notify_input_event(event);
             servo.spin_event_loop();
             state.frame_dirty = true;
