@@ -35,6 +35,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use url::Url;
 
+use crate::tab::TabManager;
+
 /// Events emitted by the Servo delegate callbacks.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -150,15 +152,15 @@ impl Default for State {
 
 /// A widget that displays a Servo webview for the current tab.
 pub(crate) struct WebViewWidget<'a, Message> {
-    window: &'a WindowState,
+    tabs: &'a TabManager,
     _phantom: std::marker::PhantomData<&'a Message>,
 }
 
 impl<'a, Message> WebViewWidget<'a, Message> {
-    /// Creates a new webview widget from a window reference.
-    pub(crate) fn new(window: &'a WindowState) -> Self {
+    /// Creates a new webview widget from a tab manager reference.
+    pub(crate) fn new(tabs: &'a TabManager) -> Self {
         Self {
-            window,
+            tabs,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -288,7 +290,7 @@ where
     ) {
         let bounds = layout.bounds();
 
-        if let Some(webview_state) = self.window.current_webview() {
+        if let Some(webview_state) = self.tabs.active_webview() {
             if let Some(handle) = &webview_state.borrow().frame_handle {
                 renderer.draw_image(
                     image::Image {
@@ -434,10 +436,10 @@ pub fn subscription() -> Subscription<WebViewMessage> {
     every(Duration::from_millis(16)).map(|_| WebViewMessage::Tick)
 }
 
-/// Process a WebViewMessage and update the current tab's webview state.
+/// Process a WebViewMessage and update the active tab's webview state.
 /// Returns a vector of ServoEvent messages that the application should handle.
-pub fn update(win: &mut WindowState, message: WebViewMessage) -> Vec<ServoEvent> {
-    let webview_state = match win.current_webview() {
+pub fn update(tabs: &TabManager, message: WebViewMessage) -> Vec<ServoEvent> {
+    let webview_state = match tabs.active_webview() {
         Some(state) => state,
         None => return Vec::new(),
     };
@@ -563,28 +565,6 @@ pub fn load_url(webview: &mut WebView, servo: &Servo, url: &str) {
     servo.spin_event_loop();
 }
 
-/// Navigate back in history.
-pub fn go_back(webview: &mut WebView, servo: &Servo, steps: usize) {
-    webview.go_back(steps);
-    servo.spin_event_loop();
-}
-
-/// Navigate forward in history.
-pub fn go_forward(webview: &mut WebView, servo: &Servo, steps: usize) {
-    webview.go_forward(steps);
-    servo.spin_event_loop();
-}
-
-/// Check if back navigation is available.
-pub fn can_go_back(webview: &WebView) -> bool {
-    webview.can_go_back()
-}
-
-/// Check if forward navigation is available.
-pub fn can_go_forward(webview: &WebView) -> bool {
-    webview.can_go_forward()
-}
-
 /// Get the current URL of the webview.
 pub fn current_url(webview: &WebView) -> String {
     webview.url().map(|u| u.to_string()).unwrap_or_default()
@@ -606,154 +586,4 @@ pub struct WebViewState {
     pub mouse_position: (f32, f32),
     /// Whether the frame needs to be recaptured on the next tick.
     pub frame_dirty: bool,
-}
-
-/// State for a single window, containing tabs and per-tab webviews.
-pub struct WindowState {
-    /// Shared Servo engine (used to create new tabs)
-    pub servo: Rc<Servo>,
-    /// Per-tab webview states
-    pub tab_webview: segmented_button::SecondaryMap<Rc<RefCell<WebViewState>>>,
-    /// Current URL displayed in the address bar (active tab only)
-    pub url: String,
-    /// Tab bar model for managing tabs
-    pub tab_model: segmented_button::SingleSelectModel,
-    /// The entity key for the current tab
-    pub tab_id: segmented_button::Entity,
-    /// Load status of the active tab (for progress bar)
-    pub load_status: LoadStatus,
-    /// Status text of the active tab (for status bar)
-    pub status_text: Option<String>,
-}
-
-impl WindowState {
-    /// Create a new window state with an initial URL.
-    pub fn new(initial_url: &str) -> Self {
-        let mut tab_model = segmented_button::SingleSelectModel::default();
-
-        let tab_id = tab_model.insert().text("New Tab").id();
-        tab_model.activate(tab_id);
-
-        // Create the Servo engine and webview
-        let (
-            servo,
-            rendering_context,
-            webview,
-            servo_event_receiver,
-        ) = Builder::default()
-            .initial_url(initial_url)
-            .transparent_background(true)
-            .size(800, 600)
-            .build();
-
-        let mut tab_webview = segmented_button::SecondaryMap::new();
-        tab_webview.insert(
-            tab_id,
-            Rc::new(RefCell::new(WebViewState {
-                servo: Rc::clone(&servo),
-                rendering_context,
-                webview,
-                frame_handle: None,
-                servo_event_receiver,
-                mouse_position: (0.0, 0.0),
-                frame_dirty: false,
-            })),
-        );
-
-        Self {
-            servo,
-            tab_webview,
-            url: initial_url.to_string(),
-            tab_model,
-            tab_id,
-            load_status: LoadStatus::Complete,
-            status_text: None,
-        }
-    }
-
-    /// Get the current tab's webview state.
-    pub fn current_webview(&self) -> Option<Rc<RefCell<WebViewState>>> {
-        self.tab_webview.get(self.tab_id).cloned()
-    }
-
-    /// Create a new tab with its own webview.
-    pub fn create_new_tab(&mut self) -> segmented_button::Entity {
-        let new_tab_id = self.tab_model.insert().text("New Tab").id();
-        self.tab_model.activate(new_tab_id);
-
-        // Create a new webview sharing the Servo engine
-        let (
-            _servo,
-            rendering_context,
-            webview,
-            servo_event_receiver,
-        ) = Builder::default()
-            .transparent_background(true)
-            .size(800, 600)
-            .build_with_servo(Rc::clone(&self.servo));
-
-        // Capture URL before moving webview
-        let url = current_url(&webview);
-
-        self.tab_webview.insert(
-            new_tab_id,
-            Rc::new(RefCell::new(WebViewState {
-                servo: Rc::clone(&self.servo),
-                rendering_context,
-                webview,
-                frame_handle: None,
-                servo_event_receiver,
-                mouse_position: (0.0, 0.0),
-                frame_dirty: false,
-            })),
-        );
-
-        // Reset state for the new tab
-        self.url = url;
-        self.load_status = LoadStatus::Complete;
-        self.status_text = None;
-        self.tab_id = new_tab_id;
-
-        new_tab_id
-    }
-
-    /// Remove a tab from the model.
-    #[allow(dead_code)]
-    pub fn remove_tab(&mut self, tab_id: segmented_button::Entity) {
-        self.tab_webview.remove(tab_id);
-        self.tab_model.remove(tab_id);
-
-        // If the removed tab was active, activate another tab
-        if self.tab_id == tab_id {
-            let iter = self.tab_model.iter().collect::<Vec<_>>();
-            if let Some(new_tab) = iter.into_iter().next() {
-                self.tab_id = new_tab;
-                self.tab_model.activate(new_tab);
-                // Sync URL from the new active tab's webview
-                if let Some(webview_state) = self.current_webview() {
-                    self.url = current_url(&webview_state.borrow().webview);
-                }
-            }
-        }
-    }
-
-    /// Extract a tab's webview for popout to a new window.
-    pub fn extract_tab(&mut self, tab_id: segmented_button::Entity) -> Option<Rc<RefCell<WebViewState>>> {
-        let webview_state = self.tab_webview.remove(tab_id);
-        self.tab_model.remove(tab_id);
-
-        // If the removed tab was active, activate another tab
-        if self.tab_id == tab_id {
-            let iter = self.tab_model.iter().collect::<Vec<_>>();
-            if let Some(new_tab) = iter.into_iter().next() {
-                self.tab_id = new_tab;
-                self.tab_model.activate(new_tab);
-                if let Some(remaining_webview) = self.current_webview() {
-                    self.url = current_url(&remaining_webview.borrow().webview);
-                }
-            }
-        }
-
-        webview_state
-    }
 }
