@@ -56,6 +56,9 @@ https://www.freedesktop.org/wiki/Specifications/secret-storage-spec/
 ##
 https://www.freedesktop.org/wiki/Specifications/desktop-bookmark-spec/
 
+## Freedesktop Metadata
+https://www.freedesktop.org/software/appstream/docs/chap-Quickstart.html#sect-Quickstart-DesktopApps
+
 ##
 https://flatpak.github.io/xdg-desktop-portal/docs/api-reference.html
 
@@ -64,3 +67,9 @@ https://gitlab.freedesktop.org/wayland/wayland-protocols/-/tree/main/staging?ref
 
 ## systemd stuf, need to understand
 https://github.com/pop-os/libcosmic/pull/1481
+
+# UI/UX
+
+## "We and Our Browser Tabs" by "Interface Studies"
+
+https://www.youtube.com/watch?v=Y0sXV1JyU_A
