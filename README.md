@@ -8,8 +8,7 @@
 
 I wasn't the first with the idea to bring [Servo](https://github.com/servo/servo) and [libcosmic](https://github.com/pop-os/libcosmic) together:
 
- * [cosmic-web](https://codeberg.org/snaggen/cosmic-web)
- * [Astrolabe](https://github.com/snaggen/astrolabe)
+ * [cosmic-web](https://codeberg.org/snaggen/cosmic-web) and [Astrolabe](https://github.com/snaggen/astrolabe) by snaggen
 
 ## Build
 
